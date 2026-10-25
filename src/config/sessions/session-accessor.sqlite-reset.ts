@@ -47,6 +47,16 @@ import type { SessionStoreTarget as SessionStoreResetScope } from "./targets-col
 
 function readResetInventory(database: OpenClawAgentReadOnlyDatabase) {
   const db = getSessionKysely(database.db);
+  const cold = [];
+  for (const archive of executeSqliteQuerySync(
+    database.db,
+    db
+      .selectFrom("session_transcript_cold_archives")
+      .select(sessionColdArchiveMetadataColumns)
+      .orderBy("session_id"),
+  ).rows) {
+    cold.push(Object.assign(archive, { chunks: readSessionColdChunks(database.db, archive) }));
+  }
   return {
     nodes: executeSqliteQuerySync(
       database.db,
@@ -59,17 +69,7 @@ function readResetInventory(database: OpenClawAgentReadOnlyDatabase) {
       sessionId: session_id,
       snapshot: readSessionStateDeleteSnapshot(database.db, session_id),
     })),
-    cold: executeSqliteQuerySync(
-      database.db,
-      db
-        .selectFrom("session_transcript_cold_archives")
-        .select(sessionColdArchiveMetadataColumns)
-        .orderBy("session_id"),
-    ).rows.map((archive) =>
-      Object.assign(archive, {
-        chunks: readSessionColdChunks(database.db, archive),
-      }),
-    ),
+    cold,
     archives: readSessionTranscriptArchiveResetInventory(database),
   };
 }

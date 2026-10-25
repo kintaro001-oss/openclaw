@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import zlib from "node:zlib";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { clearNodeSqliteKyselyCacheForDatabase } from "../../infra/kysely-sync.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
 import {
@@ -169,10 +170,22 @@ it("embeds every chunk for a self-contained backup and re-externalizes it", asyn
   expect((await archive()).archivedTranscripts).toBe(1);
   const descriptor = readSessionColdTranscript(fixture.database(), historicalId)!;
   const chunks = readSessionColdChunks(fixture.database(), descriptor);
-  await embedSessionColdArchivesInSnapshot({
-    database: fixture.database(),
-    sourceStorePath: fixture.scope.storePath,
-  });
+  const database = fixture.database();
+  clearNodeSqliteKyselyCacheForDatabase(database);
+  const hostPrepare = vi.spyOn(database, "prepare");
+  try {
+    await embedSessionColdArchivesInSnapshot({
+      database,
+      sourceStorePath: fixture.scope.storePath,
+    });
+    expect(
+      hostPrepare.mock.calls.filter(([statement]) =>
+        statement.includes("session_transcript_cold_archive"),
+      ),
+    ).toEqual([]);
+  } finally {
+    hostPrepare.mockRestore();
+  }
   for (const chunk of chunks) {
     await fs.unlink(resolveSessionColdArchivePath(fixture.scope.storePath, chunk.archive_name));
   }
