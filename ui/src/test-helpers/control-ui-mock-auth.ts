@@ -1,11 +1,14 @@
-import type { ControlUiMockGatewayScenario } from "./control-ui-e2e.ts";
+import type { HelloOk } from "@openclaw/gateway-protocol";
 
-export function normalizeControlUiMockAuth(
-  scenario: Pick<
-    ControlUiMockGatewayScenario,
-    "deviceToken" | "authMethod" | "authMode" | "omitConnectHelloAuth"
-  >,
-) {
+export type ControlUiMockAuth = {
+  deviceToken?: string | null;
+  authMethod?: HelloOk["auth"]["method"];
+  authMode?: HelloOk["snapshot"]["authMode"] | null;
+  /** Simulate a legacy Gateway whose connect hello predates the auth projection. */
+  omitConnectHelloAuth?: boolean;
+};
+
+export function normalizeControlUiMockAuth(scenario: ControlUiMockAuth) {
   return {
     // Prepared scenarios are normalized again before serialization; preserve explicit omission.
     deviceToken:

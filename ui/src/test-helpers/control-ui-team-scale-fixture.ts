@@ -23,6 +23,7 @@ import {
 } from "./control-ui-team-scale-inventory.ts";
 import {
   createTeamScalePeople,
+  TEAM_SCALE_AVATAR_ASSET,
   TEAM_SCALE_SELF_INSTANCE_ID,
 } from "./control-ui-team-scale-people.ts";
 import {
@@ -108,11 +109,10 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
   if (options.transcriptAvatars) {
     transcriptSender.avatarUrl = `/api/users/${transcriptSender.id}/avatar?v=${now}`;
     profiles[4]!.hasAvatar = true;
-    profiles[4]!.avatarMime = "image/svg+xml";
+    profiles[4]!.avatarMime = "image/png";
     assets.set(`/api/users/${transcriptSender.id}/avatar`, {
-      contentType: "image/svg+xml",
+      ...TEAM_SCALE_AVATAR_ASSET,
       headers: { "Cache-Control": "private, max-age=31536000, immutable" },
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="teal"/></svg>',
     });
   }
   const { sessions, pinnedRows, pinnedKeys, selectedSessionKey, sidebarPersistentChildren } =

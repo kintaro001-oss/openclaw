@@ -5,7 +5,7 @@ import { stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { HelloOk, MessageReactionSummary } from "@openclaw/gateway-protocol";
+import type { MessageReactionSummary } from "@openclaw/gateway-protocol";
 import { normalizeAgentId } from "@openclaw/normalization-core/agent-id";
 import type { Locator, Page } from "playwright";
 import type { InlineConfig, Plugin, PreviewServer, ViteDevServer } from "vite";
@@ -59,7 +59,7 @@ import {
   extendControlUiE2eWaitTimeoutForSourceServer,
 } from "./control-ui-e2e-readiness.ts";
 import { getSharedControlUiE2ePreview } from "./control-ui-e2e-shared-preview.ts";
-import { normalizeControlUiMockAuth } from "./control-ui-mock-auth.ts";
+import { normalizeControlUiMockAuth, type ControlUiMockAuth } from "./control-ui-mock-auth.ts";
 import { createControlUiMockDeferredRequests } from "./control-ui-mock-deferred-requests.ts";
 import { createControlUiMockPresence } from "./control-ui-mock-presence.ts";
 import { createControlUiMockReactions } from "./control-ui-mock-reactions.ts";
@@ -194,7 +194,7 @@ const json5BrowserSource = readFileSync(require.resolve("json5/dist/index.min.js
 export { installControlUiMockBootstrapDocument } from "./control-ui-bootstrap-fixture.ts";
 export { defaultControlUiFeatureMethods } from "./control-ui-e2e-defaults.ts";
 
-export type ControlUiMockGatewayScenario = {
+export type ControlUiMockGatewayScenario = ControlUiMockAuth & {
   bootstrapPreferences?: ControlUiBootstrapConfig["preferences"];
   /** Auto-wait for sidebar rosters unless startup is held or connect fails; true overrides those skips, false disables the wait. */
   awaitInitialRoster?: boolean;
@@ -249,9 +249,6 @@ export type ControlUiMockGatewayScenario = {
   updateSchedule?: UpdateScheduleState | null;
   controlUiBuildSource?: "bundled" | "configured";
   serverVersion?: string;
-  deviceToken?: string | null;
-  authMethod?: HelloOk["auth"]["method"];
-  authMode?: HelloOk["snapshot"]["authMode"] | null;
   featureEvents?: string[];
   featureMethods?: string[];
   /** Simulate a legacy Gateway that predates the advertised method catalog. */
@@ -298,8 +295,6 @@ export type ControlUiMockGatewayScenario = {
   /** Partition sessions.list fixtures by archived state after applying patches. */
   sessionArchiveFiltering?: boolean;
   models?: ModelCatalogEntry[];
-  /** Simulate a legacy Gateway whose connect hello predates the auth projection. */
-  omitConnectHelloAuth?: boolean;
   /** Operator scopes returned by the mocked connect handshake. */
   operatorScopes?: string[];
   /** Role-limited access to other people's sessions, as a configured Gateway role reports it. */
