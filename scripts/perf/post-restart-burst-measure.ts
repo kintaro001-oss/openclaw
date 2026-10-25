@@ -8,6 +8,8 @@ import { finished as streamFinished } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { buildDeviceAuthPayloadV3 } from "../../packages/gateway-client/src/device-auth.ts";
+import { GatewayClientRequestError } from "../../packages/gateway-client/src/request-error.ts";
+import { resolveGatewayStartupRetryAfterMs } from "../../packages/gateway-protocol/src/startup-unavailable.ts";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.ts";
 import { isRecord } from "../../packages/normalization-core/src/record-coerce.ts";
 import { stripInboundMetadata } from "../../src/auto-reply/reply/strip-inbound-meta.js";
@@ -21,6 +23,7 @@ import {
   summarizeMockInferenceRequest,
 } from "../e2e/lib/mock-inference-facts.ts";
 import { readBody } from "../e2e/lib/mock-openai-http.mjs";
+import { resolveColdLoadLatency } from "../lib/control-ui-bench-latency.ts";
 import { stopChild } from "../lib/gateway-bench-child.ts";
 import { GATEWAY_GC_TRACE_MARKER, readGatewayGcTrace } from "../lib/gateway-bench-profile.ts";
 import {
@@ -77,6 +80,13 @@ if (port > 65535 || mockPort > 65535 || port === mockPort) {
 const reconnectWaves = values["reconnect-waves"];
 const coldRowReads = values["cold-row-reads"];
 const startupAdmission = values["startup-admission"];
+const reloadLatency = values["from-listening"]
+  ? resolveColdLoadLatency({
+      profile: "live-fast",
+      methodLatencyMs: [],
+      sidebarQueryLatencyMs: [],
+    })
+  : undefined;
 if (startupAdmission && !coldRowReads) {
   throw new Error("--startup-admission requires --cold-row-reads");
 }
@@ -183,12 +193,27 @@ if (!isRecord(fixture) || fixture.format !== "openclaw-team-shape-v1") {
 }
 if (
   coldRowReads &&
-  (fixture.sessionCount !== 5000 || (fixture.retainedRuns !== 0 && fixture.settledRuns !== true))
+  ((fixture.sessionCount !== 5000 &&
+    !(values["from-listening"] && fixture.sessionCount === 10800)) ||
+    (fixture.retainedRuns !== 0 && fixture.settledRuns !== true))
 ) {
-  throw new Error("--cold-row-reads requires 5000 sessions and --settled-runs (or --runs 0)");
+  throw new Error(
+    "--cold-row-reads requires 5000 sessions (or 10800 with --from-listening) and settled runs",
+  );
 }
-if (startupAdmission && 1 + 10 * (clientCount - 1) > 5000) {
-  throw new Error("--startup-admission requires at most 500 clients for distinct shared sessions");
+// The stress inventory starts with unarchived roots; seven of each ten are shared.
+const coldRowSessionKeys = Array.isArray(fixture.stressTargets)
+  ? fixture.stressTargets.flatMap((target, index) =>
+      index % 10 < 7 && isRecord(target) && typeof target.sessionKey === "string"
+        ? [target.sessionKey]
+        : [],
+    )
+  : Array.from(
+      { length: Math.min(clientCount, 500) },
+      (_, index) => `agent:main:team-shape-session-${1 + 10 * index}`,
+    );
+if (startupAdmission && coldRowSessionKeys.length < clientCount) {
+  throw new Error("Fixture has too few distinct shared sessions for the requested clients");
 }
 const worktreeProject = Array.isArray(fixture.projectWorktrees)
   ? fixture.projectWorktrees[0]
@@ -303,16 +328,30 @@ writeFileSync(
 import { isMainThread, MessagePort } from 'node:worker_threads';
 if (isMainThread) {
   if (!process.send) throw new Error('Benchmark requires private IPC');
+  if (${values["from-listening"]}) {
+    const { Server } = await import('node:net');
+    const emit = Server.prototype.emit;
+    Server.prototype.emit = function(event, ...args) {
+      const address = event === 'listening' ? this.address() : undefined;
+      if (address && typeof address === 'object' && address.port === ${port}) {
+        startColdRowMeasurement();
+        process.send?.({ channel: 'post-restart-listening', pid: process.pid, atNs: process.hrtime.bigint().toString() });
+      }
+      return emit.call(this, event, ...args);
+    };
+  }
   ${
     coldRowReads
       ? `const { registerHooks, stripTypeScriptTypes } = await import('node:module');
+  ${values["from-listening"] ? "const { transformSync } = await import('esbuild');" : ""}
   const { readFileSync, writeSync } = await import('node:fs');
   const { createHash } = await import('node:crypto');
   const rowOwnerPath = ${JSON.stringify(rowRefreshOwner)};
   const rowOwnerSha256 = ${JSON.stringify(rowRefreshOwnerSha256)};
-  const rowCounts = { active: false, selectPage: 0, taskSamples: 0, taskMaxMs: 0, taskName: null, taskPhase: null };
+  const rowCounts = { active: false, selectPage: 0, materializedRows: 0, taskSamples: 0, taskMaxMs: 0, taskName: null, taskPhase: null };
   Object.defineProperty(globalThis, Symbol.for('openclaw.bench.cold-row-counts'), { value: rowCounts });
   const admissionSamples = new Map();
+  const rpcPhases = [];
   let admissionSampleCount = 0;
   let admissionOverflow = false;
   const recordAdmissionSample = (key, ms) => {
@@ -328,12 +367,25 @@ if (isMainThread) {
     const methods = new Set(['models.list', 'sessions.subscribe', 'sessions.list', 'board.get', 'sessions.describe', 'sessions.resolve', 'sessions.messages.subscribe', 'chat.startup']);
     channel('openclaw.gateway.rpc').subscribe((event) => {
       if (!rowCounts.active || !methods.has(event.method)) return;
+      if (${values["from-listening"]}) {
+        if (!Number.isFinite(event.benchmarkStartedAt)) throw new Error('Missing per-request diagnostics identity');
+        if (rpcPhases.length >= 200000) { admissionOverflow = true; return; }
+        rpcPhases.push({ request: event.benchmarkStartedAt, method: event.method, phase: event.phase,
+          atMs: performance.now(), durationMs: event.durationMs, admissionMs: event.admissionMs,
+          queueWaitMs: event.queueWaitMs, outcome: event.outcome, firstResponse: event.firstResponse });
+      }
       if (event.phase === 'dispatch') recordAdmissionSample(event.method + ':queue_wait', event.queueWaitMs);
       if (event.phase === 'handler') {
         recordAdmissionSample(event.method + ':admission', event.admissionMs);
         recordAdmissionSample(event.method + ':handler', event.durationMs);
       }
       if (event.phase === 'response' && event.firstResponse) recordAdmissionSample(event.method + ':first_response', event.durationMs);
+    });
+    channel('openclaw.gateway.request.stages').subscribe((event) => {
+      if (!methods.has(event.operation)) return;
+      for (const [stage, ms] of Object.entries(event.phaseDurationsMs)) {
+        recordAdmissionSample(event.operation + ':stage:' + stage, ms);
+      }
     });
     rowCounts.startSpan = (name) => {
       if (!rowCounts.active || (!name.startsWith('gateway.chat.startup.') && !name.startsWith('startup-boundary.'))) return undefined;
@@ -357,6 +409,20 @@ if (isMainThread) {
   }
   registerHooks({ load(url, context, next) {
     const loaded = next(url, context);
+    if (${values["from-listening"]} && url.endsWith('/src/gateway/session-row-projection.ts')) {
+      let source = stripTypeScriptTypes(readFileSync(new URL(url), 'utf8'));
+      const materialized = 'materializedSequence: ++materializedCount';
+      if (!source.includes(materialized)) throw new Error('Missing row materialization counter hook');
+      source = source.replace(materialized, 'materializedSequence: (globalThis[Symbol.for("openclaw.bench.cold-row-counts")].active && globalThis[Symbol.for("openclaw.bench.cold-row-counts")].materializedRows++, ++materializedCount)');
+      return { ...loaded, source };
+    }
+    if (${values["from-listening"]} && url.endsWith('/src/gateway/server/ws-connection/request-diagnostics.ts')) {
+      let source = readFileSync(new URL(url), 'utf8');
+      const publish = 'rpcDiagnostics.publish({ ...event,';
+      if (!source.includes(publish)) throw new Error('Missing per-request diagnostics hook');
+      source = source.replace(publish, 'rpcDiagnostics.publish({ benchmarkStartedAt: this.startedAt, ...event,');
+      return { ...loaded, source: transformSync(source, { loader: 'ts', format: 'esm', target: 'esnext' }).code };
+    }
     if (${startupAdmission} && url.endsWith('/src/gateway/server/ws-connection/request-start.ts')) {
       const source = readFileSync(${JSON.stringify(requestStartOwner)}, 'utf8');
       if (createHash('sha256').update(source).digest('hex') !== ${JSON.stringify(requestStartOwnerSha256)}) {
@@ -399,6 +465,13 @@ if (isMainThread) {
       return { ...loaded, source };
     }
     if (${startupAdmission}) {
+      if (url.endsWith('/src/gateway/server-methods/request-authorization.ts')) {
+        let source = stripTypeScriptTypes(readFileSync(new URL(url), 'utf8'));
+        const preparation = 'agents = await prepareStartupReadAgents(';
+        if (!source.includes(preparation)) throw new Error('Missing startup agent preparation hook');
+        source = source.replace(preparation, 'using benchmarkSpan = globalThis[Symbol.for("openclaw.bench.cold-row-counts")].startSpan("startup-boundary.agent_preparation");' + preparation);
+        return { ...loaded, source };
+      }
       const boundary = url.endsWith('/src/gateway/server-methods/chat-pending-inputs.ts')
         ? ['readChatPendingInputs', 'pending_inputs']
         : url.endsWith('/src/agents/subagents/registry/subagent-registry-state.ts')
@@ -642,14 +715,18 @@ if (isMainThread) {
     const percentile = (fraction) => pauses[Math.max(0, Math.ceil(pauses.length * fraction) - 1)] ?? null;
     return { samples: pauses.length, totalMs: pauses.reduce((sum, ms) => sum + ms, 0), p95Ms: percentile(0.95), p99Ms: percentile(0.99), maxMs: pauses.at(-1) ?? null };
   };
+  function startColdRowMeasurement() {
+    if (rowCounts.active) return;
+    markColdGc('diagnostics-start');
+    coldStartedAt = performance.now();
+    coldThreadCpu = process.threadCpuUsage();
+    coldProcessCpu = process.cpuUsage();
+    rowCounts.active = true;
+    coldLag.enable();
+  }
   process.on('message', async (message) => {
     if (message?.channel === 'cold-rows-ready') {
-      markColdGc('diagnostics-start');
-      coldStartedAt = performance.now();
-      coldThreadCpu = process.threadCpuUsage();
-      coldProcessCpu = process.cpuUsage();
-      rowCounts.active = true;
-      coldLag.enable();
+      startColdRowMeasurement();
       process.send?.({ channel: 'cold-rows-ready', pid: process.pid });
     }
     if (message?.channel === 'cold-rows-finish') {
@@ -678,8 +755,8 @@ if (isMainThread) {
         p99Ms: coldLag.percentile(99)/1e6, maxMs: coldLag.max/1e6,
         mainThreadCpuMs: (threadCpu.user + threadCpu.system)/1000,
         processCpuMs: (processCpu.user + processCpu.system)/1000,
-        selectPageCalls: rowCounts.selectPage, rowOwnerSha256,
-        admission,
+        selectPageCalls: rowCounts.selectPage, materializedRows: rowCounts.materializedRows, rowOwnerSha256,
+        admission, rpcPhases,
         synchronousTasks: { samples: rowCounts.taskSamples, maxMs: rowCounts.taskMaxMs, task: rowCounts.taskName, phase: rowCounts.taskPhase, boundary: 'inclusive synchronous runWithMainThreadTask callbacks; nested scopes may overlap' },
         gc: { scope: 'main-isolate', all: gcSummary(), minor: gcSummary(constants.NODE_PERFORMANCE_GC_MINOR), major: gcSummary(constants.NODE_PERFORMANCE_GC_MAJOR) } });
     }
@@ -700,7 +777,9 @@ if (isMainThread) {
 `,
 );
 const env = {
-  ...createGatewayBenchEnv(path.join(root, "home"), configPath, { startupTrace: false }),
+  ...createGatewayBenchEnv(path.join(root, "home"), configPath, {
+    startupTrace: values["from-listening"],
+  }),
   OPENCLAW_STATE_DIR: root,
   TMPDIR: path.join(root, "tmp"),
   ...(!coldRowReads ? { OPENAI_API_KEY: "synthetic-fixture" } : {}),
@@ -730,7 +809,7 @@ let closing = false;
 const children: ChildProcess[] = [];
 const childLogs = new Map<ChildProcess, ReturnType<typeof createWriteStream>>();
 const expectedExits = new Set<ChildProcess>();
-const listeners = new Set<ChildProcess>();
+const listeners = new Map<ChildProcess, number>();
 const clients = new Set<ReturnType<typeof createGatewayWsClient>>();
 type EluSample = {
   elapsedMs: number;
@@ -751,10 +830,12 @@ const coldRowsLoop = Promise.withResolvers<{
   mainThreadCpuMs: number;
   processCpuMs: number;
   selectPageCalls: number;
+  materializedRows: number;
   rowOwnerSha256: string;
   gc: Record<string, unknown>;
   synchronousTasks: Record<string, unknown>;
   admission?: Record<string, unknown>;
+  rpcPhases?: unknown[];
 }>();
 let githubFixtureRequests = 0;
 let vapidPublicKey: string | undefined;
@@ -964,8 +1045,12 @@ function launch(name: string) {
   let startupOutput = "";
   const observe = (chunk: Buffer) => {
     startupOutput = (startupOutput + chunk.toString()).slice(-4096);
-    if (startupOutput.includes("http server listening (")) {
-      listeners.add(child);
+    if (
+      (!recovering || !values["from-listening"]) &&
+      !listeners.has(child) &&
+      startupOutput.includes("http server listening (")
+    ) {
+      listeners.set(child, performance.now());
     }
   };
   child.stdout?.on("data", observe);
@@ -980,6 +1065,13 @@ function launch(name: string) {
   });
   child.on("message", (sample: unknown) => {
     if (coldRowReads && recovering && isRecord(sample) && sample.pid === child.pid) {
+      if (sample.channel === "post-restart-listening" && typeof sample.atNs === "string") {
+        listeners.set(
+          child,
+          performance.now() - Number(process.hrtime.bigint() - BigInt(sample.atNs)) / 1e6,
+        );
+        return;
+      }
       if (sample.channel === "cold-rows-ready") {
         coldRowsReady.resolve();
         return;
@@ -993,6 +1085,7 @@ function launch(name: string) {
         typeof sample.mainThreadCpuMs === "number" &&
         typeof sample.processCpuMs === "number" &&
         typeof sample.selectPageCalls === "number" &&
+        typeof sample.materializedRows === "number" &&
         typeof sample.rowOwnerSha256 === "string" &&
         isRecord(sample.gc) &&
         isRecord(sample.synchronousTasks)
@@ -1005,10 +1098,12 @@ function launch(name: string) {
           mainThreadCpuMs: sample.mainThreadCpuMs,
           processCpuMs: sample.processCpuMs,
           selectPageCalls: sample.selectPageCalls,
+          materializedRows: sample.materializedRows,
           rowOwnerSha256: sample.rowOwnerSha256,
           gc: sample.gc,
           synchronousTasks: sample.synchronousTasks,
           ...(isRecord(sample.admission) ? { admission: sample.admission } : {}),
+          ...(Array.isArray(sample.rpcPhases) ? { rpcPhases: sample.rpcPhases } : {}),
         });
         return;
       }
@@ -1124,9 +1219,18 @@ async function rpc(
   timeoutMs = 360_000,
 ) {
   assertAlive();
+  const startedAt = performance.now();
   const reply = await client.request(method, params, timeoutMs);
+  const deliveryFloorMs = reloadLatency?.methodLatencyMs[method] ?? reloadLatency?.latencyMs ?? 0;
+  const remainingMs = deliveryFloorMs - (performance.now() - startedAt);
+  if (remainingMs > 0) {
+    await delay(remainingMs);
+  }
   assertAlive();
   if (!reply.ok) {
+    if (method === "connect") {
+      throw new GatewayClientRequestError(reply.error ?? {});
+    }
     throw new Error(`${method}: ${JSON.stringify(reply.error)}`);
   }
   if (values["cheap-handlers"] || values["transcript-reads"]) {
@@ -1939,7 +2043,7 @@ async function measureColdRowReads(
   if (!sender) {
     throw new Error("No synthetic sender connected");
   }
-  const sessionKey = "agent:main:team-shape-session-1";
+  const sessionKey = coldRowSessionKeys[0]!;
   for (let index = 0; index < 3; index++) {
     await rpc(sender, "board.widget.put", {
       sessionKey,
@@ -2034,24 +2138,41 @@ async function measureColdRowReads(
   ];
   // The fixture's indices ending in 1 are shared and unarchived.
   const clientSessionKeys = Array.from({ length: clientCount }, (_, index) =>
-    startupAdmission ? `agent:main:team-shape-session-${1 + 10 * index}` : sessionKey,
+    startupAdmission ? coldRowSessionKeys[index]! : sessionKey,
   );
   const clientReadShapes = clientSessionKeys.map(makeReadShapes);
   const readShapes = clientReadShapes[0]!;
   const deadline = loadStartedAt + durationMs;
+  if (reloadLatency) {
+    await delay(
+      Math.max(0, listeners.get(restarted)! + reloadLatency.connectNotBeforeMs - performance.now()),
+    );
+  }
   console.log(`PHASE cold-row-ready ${readyMs.toFixed(1)}ms`);
   const connections: ConnectAttempt[] = [];
   const observations = await Promise.allSettled(
     Array.from({ length: clientCount }, async (_, index) => {
-      const attempt: ConnectAttempt = {
-        client: index,
-        wave: 0,
-        startedAtMs: performance.now(),
-        startedMs: performance.now() - restartAt,
-        elapsedMs: 0,
-      };
-      connections.push(attempt);
-      const client = await connect(index, { attempt });
+      let client: Awaited<ReturnType<typeof connect>>;
+      for (;;) {
+        const attempt: ConnectAttempt = {
+          client: index,
+          wave: 0,
+          startedAtMs: performance.now(),
+          startedMs: performance.now() - restartAt,
+          elapsedMs: 0,
+        };
+        connections.push(attempt);
+        try {
+          client = await connect(index, { attempt });
+          break;
+        } catch (error) {
+          const retryMs = resolveGatewayStartupRetryAfterMs(error);
+          if (!values["from-listening"] || retryMs === null || performance.now() >= deadline) {
+            throw error;
+          }
+          await delay(retryMs);
+        }
+      }
       const clientSessionKey = clientSessionKeys[index]!;
       connectedClients.add(index);
       for (
@@ -2122,8 +2243,8 @@ async function measureColdRowReads(
                 !response.sessions.some(
                   (row: unknown) =>
                     isRecord(row) &&
-                    typeof row.key === "string" &&
-                    row.key.startsWith("agent:main:team-shape-session-"),
+                    typeof row.sessionId === "string" &&
+                    row.sessionId.startsWith("team-shape-session-"),
                 )
               ) {
                 throw new Error("Session list did not return the seeded roster");
@@ -2157,10 +2278,12 @@ async function measureColdRowReads(
     mainThreadCpuMs,
     processCpuMs,
     selectPageCalls,
+    materializedRows,
     rowOwnerSha256,
     gc,
     synchronousTasks,
     admission,
+    rpcPhases,
     ...loop
   } = await Promise.race([
     coldRowsLoop.promise,
@@ -2188,6 +2311,8 @@ async function measureColdRowReads(
     fixture,
     scenario: startupAdmission ? "startup-admission" : "cold-row-reads",
     reconnectBoundary: values["from-listening"] ? "listening" : "ready",
+    ...(reloadLatency ? { reloadLatency } : {}),
+    listeningMs: listeners.get(restarted)! - restartAt,
     connections,
     clientCount,
     ...(startupAdmission
@@ -2196,6 +2321,7 @@ async function measureColdRowReads(
           pollMs,
           clientSessionKeys,
           admission,
+          rpcPhases,
           requestStartOwner: { path: requestStartOwner, sha256: requestStartOwnerSha256 },
         }
       : {}),
@@ -2207,6 +2333,7 @@ async function measureColdRowReads(
     mainThreadCpuMs,
     processCpuMs,
     selectPageCalls,
+    materializedRows,
     rowRefreshOwner: { path: rowRefreshOwner, sha256: rowOwnerSha256 },
     gc,
     promotion,
@@ -2235,7 +2362,13 @@ async function measureColdRowReads(
     eluSamples,
   };
   writeFileSync(path.join(output, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-  console.log(JSON.stringify({ ...result, timings: undefined, eluSamples: undefined }, null, 2));
+  console.log(
+    JSON.stringify(
+      { ...result, rpcPhases: undefined, timings: undefined, eluSamples: undefined },
+      null,
+      2,
+    ),
+  );
   if (
     errors.length ||
     connectedClients.size !== clientCount ||

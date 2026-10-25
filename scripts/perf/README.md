@@ -909,15 +909,30 @@ transcript hydration. Keep identical instrumentation for A/A and A/B runs, use
 the campaign's untraced cost gates, and collect promotion separately with
 `--trace-gc` and its own controls.
 
-Add `--from-listening` to start the reconnect cohort as soon as the restarted
-Gateway logs its listening boundary, before `/readyz` succeeds. This captures
-the upgrade and hello wait that a readiness-gated cohort misses. The result
+Add `--from-listening` to start the reconnect cohort at the restarted Gateway's
+socket `listening` event, before `/readyz` succeeds. A private IPC notification
+uses the host's monotonic clock; the application listening log occurs later.
+CPU, GC, event-loop delay, and materialization counts start in that same event.
+The cohort uses the shared `live-fast` delivery floors and connect offset,
+recorded as `reloadLatency`; server diagnostic durations exclude these floors.
+This captures the upgrade and hello wait that a readiness-gated cohort misses. The result
 records `reconnectBoundary` and per-client upgrade, challenge, hello, and total
-connection timings alongside the RPC phase samples. First-batch completion time
-relative to `readyMs` includes those connection waits; in this mode `readyMs`
+connection timings alongside the RPC phase samples, retaining failed attempts.
+Only structured startup refusals retry, using the server's retry-after hint.
+First-batch completion time relative to `listeningMs` includes those connection
+waits; in this mode `readyMs`
 names the observed listening boundary rather than readiness. Use at least 30
 clients for a restart reload wave. This is a clean restart with settled runs;
 interrupted-run recovery still requires the separate restart workload.
+
+For the larger restart cohort, generate `--sessions 10800 --runs 4300
+--settled-runs --team-stress` instead. The listening mode accepts this inventory
+and chooses shared, unarchived keys from its recorded stress targets. Its
+`rpcPhases` result joins queue, admission, handler, and first-response samples by
+a benchmark-only request timestamp; no request payload or durable identifier is
+captured. The source hook fails if that identity is missing. Compare identical
+instrumentation on both revisions; these records do not change product telemetry.
+
 Use `--request-start-owner /path/to/request-start.ts` to compare scheduler
 revisions in the same installation. The source loader verifies the selected
 file's SHA-256 at load time and records it in the result.
