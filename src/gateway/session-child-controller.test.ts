@@ -80,7 +80,9 @@ test("keeps controller and native owners equivalent across generations, identiti
     const previousClaim = claims.get(id);
     const operation = random(6);
     if (operation === 0) {
-      if (previousClaim) releaseAgentRunContext(id, previousClaim);
+      if (previousClaim) {
+        releaseAgentRunContext(id, previousClaim);
+      }
       claims.delete(id);
     } else if (operation === 1) {
       subagentRuns.delete(id);
@@ -121,7 +123,9 @@ test("keeps controller and native owners equivalent across generations, identiti
     }
   }
   rotateAgentRunRegistryLifecycleGeneration();
-  for (const row of rows) expect(resolveSessionChildController(row.key, row.entry)).toBeUndefined();
+  for (const row of rows) {
+    expect(resolveSessionChildController(row.key, row.entry)).toBeUndefined();
+  }
 });
 
 test("resolves a queued controller through a replacement execution's scheduler slot", async () => {
@@ -160,12 +164,14 @@ test("resolves a queued controller through a replacement execution's scheduler s
 
 test("repeated row reads consume the recorded controller without examining runs", () => {
   let executionReads = 0;
-  const entry = run("counted", {
+  const execution = { status: "terminal" as const, endedAt: 2 };
+  const entry = {
+    ...run("counted"),
     get execution() {
       executionReads++;
-      return { status: "terminal" as const, endedAt: 2 };
+      return execution;
     },
-  });
+  };
   subagentRuns.set(entry.runId, entry);
   executionReads = 0;
   for (let read = 0; read < 100; read++) {

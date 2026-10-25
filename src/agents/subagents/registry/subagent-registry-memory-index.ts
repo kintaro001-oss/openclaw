@@ -1,9 +1,6 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { matchesSubagentChildSessionOwner } from "./subagent-child-owner-match.js";
-import { getRecordedSubagentChildAuthority } from "./subagent-registry-memory.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { compareSubagentRunGeneration } from "./subagent-run-generation.js";
-import { isSubagentRunLive, isSubagentRunQueued } from "./subagent-run-liveness.js";
 
 export class SubagentRunIndex extends Map<string, Map<string, SubagentRunRecord>> {
   private readonly latest = new Map<string, SubagentRunRecord>();
@@ -65,16 +62,15 @@ function newerController(left: ChildController | undefined, right: ChildControll
 export class SubagentChildControllerIndex {
   private readonly controllers = new Map<string, Map<string, Map<string, ChildController>>>();
 
-  constructor(private readonly runs: ReadonlyMap<string, ReadonlyMap<string, SubagentRunRecord>>) {}
+  constructor(
+    private readonly runs: ReadonlyMap<string, ReadonlyMap<string, SubagentRunRecord>>,
+    private readonly eligible: (run: SubagentRunRecord, childSessionKey: string) => boolean,
+  ) {}
 
   refresh(childSessionKey: string): void {
     let sessions: Map<string, Map<string, ChildController>> | undefined;
     for (const run of this.runs.get(childSessionKey)?.values() ?? []) {
-      if (
-        !(isSubagentRunLive(run) || isSubagentRunQueued(run)) ||
-        !matchesSubagentChildSessionOwner(run, childSessionKey) ||
-        getRecordedSubagentChildAuthority(run).status === "mismatch"
-      ) {
+      if (!this.eligible(run, childSessionKey)) {
         continue;
       }
       // Missing original fields are wildcards; comparison uses the recorded, untrimmed identity.

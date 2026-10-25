@@ -34,6 +34,10 @@ import {
 } from "./subagent-registry-work-index.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import {
+  isSubagentRunLiveFromRuns,
+  isSubagentRunQueuedFromRuns,
+} from "./subagent-run-execution-owner.js";
+import {
   getSubagentRunRuntimeKey,
   copySubagentRunRuntimeOwner,
   retainSubagentRunRuntimeOwner,
@@ -170,6 +174,11 @@ const runIndexes = [
 
 export const subagentChildControllers = new SubagentChildControllerIndex(
   childSessionCandidatesByKey,
+  (run, childSessionKey) =>
+    (isSubagentRunLiveFromRuns(subagentRuns, run) ||
+      isSubagentRunQueuedFromRuns(subagentRuns, run)) &&
+    matchesSubagentChildSessionOwner(run, childSessionKey) &&
+    getRecordedSubagentChildAuthority(run).status !== "mismatch",
 );
 
 function refreshControllerOwner(runId?: string): void {

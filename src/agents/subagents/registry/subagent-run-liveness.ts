@@ -1,12 +1,10 @@
-import { hasLiveAgentRunContext } from "../../../infra/agent-run-registry.js";
-import { ownsSwarmRunReservation } from "../swarm/swarm-scheduler.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import {
-  getSubagentRunRuntimeKey,
-  isSameSubagentRunOwner,
-  type SubagentRunIdentity,
-} from "./subagent-run-generation.js";
+  isSubagentRunLiveFromRuns,
+  isSubagentRunQueuedFromRuns,
+} from "./subagent-run-execution-owner.js";
+import type { SubagentRunIdentity } from "./subagent-run-generation.js";
 import { resolveSubagentRunDurationMs } from "./subagent-run-timeout.js";
 import { getSubagentSessionStartedAt } from "./subagent-session-metrics.js";
 
@@ -18,37 +16,13 @@ type SubagentRunLivenessRecord = Pick<
 };
 
 /** Routing metadata alone does not own an execution. */
-export function isSubagentRunLive(
-  entry:
-    | (SubagentRunIdentity & { execution: Pick<SubagentRunRecord["execution"], "endedAt"> })
-    | null
-    | undefined,
-): boolean {
-  if (!entry || typeof entry.execution.endedAt === "number") {
-    return false;
-  }
-  const current = subagentRuns.get(entry.runId);
-  return Boolean(
-    current &&
-    typeof current.execution.endedAt !== "number" &&
-    isSameSubagentRunOwner(current, entry) &&
-    hasLiveAgentRunContext(entry.runId),
-  );
+export function isSubagentRunLive(entry: Parameters<typeof isSubagentRunLiveFromRuns>[1]): boolean {
+  return isSubagentRunLiveFromRuns(subagentRuns, entry);
 }
 
 /** Queued admission belongs to the exact current registration and scheduler reservation. */
 export function isSubagentRunQueued(entry: SubagentRunIdentity | null | undefined): boolean {
-  const current = entry ? subagentRuns.get(entry.runId) : undefined;
-  return Boolean(
-    current &&
-    current.collect &&
-    current.execution.status === "queued" &&
-    isSameSubagentRunOwner(current, entry) &&
-    ownsSwarmRunReservation(
-      current.schedulerSlotId ?? current.runId,
-      getSubagentRunRuntimeKey(current),
-    ),
-  );
+  return isSubagentRunQueuedFromRuns(subagentRuns, entry);
 }
 
 const STALE_UNENDED_SUBAGENT_RUN_MS = 2 * 60 * 60 * 1_000;

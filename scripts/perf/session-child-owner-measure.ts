@@ -102,15 +102,14 @@ let listSessions:
   | undefined;
 let releaseForeground: (() => void) | undefined;
 if (fixture) {
-  const { loadConfig, setRuntimeConfigSnapshot } = await import("../../src/config/config.js");
+  const { captureRuntimeConfigAsyncReader } = await import("../../src/config/config.js");
   const { createSessionRowProjection } =
     await import("../../src/gateway/session-row-projection.js");
   const { retainSessionListForegroundWork } =
     await import("../../src/gateway/session-projection-work.js");
   const { createSubagentSessionListReadView } =
     await import("../../src/agents/subagents/registry/subagent-registry-state.js");
-  const cfg = loadConfig();
-  setRuntimeConfigSnapshot(cfg);
+  const cfg = await captureRuntimeConfigAsyncReader()();
   releaseForeground = retainSessionListForegroundWork();
   projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
   await projection.ensureMaterialized();
@@ -119,17 +118,17 @@ if (fixture) {
   const sessions = new Map(rows.map((row) => [row.key, row.entry]));
   const source = createSubagentSessionListReadView({ env: process.env });
   await source.prepare();
-  for (const run of source.runs().values()) {
-    const child = sessions.get(run.childSessionKey);
+  for (const retained of source.runs().values()) {
+    const child = sessions.get(retained.childSessionKey);
     assert.ok(child, "Registry child must belong to the generated fixture");
     const entry: SubagentRunRecord = {
-      ...run,
+      ...retained,
       childSessionIdentity: {
         sessionId: child.sessionId,
         lifecycleRevision: child.lifecycleRevision,
       },
       requesterAgentId: "main",
-      requesterDisplayKey: run.requesterSessionKey,
+      requesterDisplayKey: retained.requesterSessionKey,
       task: "Synthetic child-owner work",
       cleanup: "keep",
     };
@@ -155,7 +154,7 @@ if (fixture) {
     releaseForeground();
     releaseForeground = undefined;
   }
-} else
+} else {
   for (let parent = 0; parent < parentCount; parent++) {
     for (let child = 0; child < childCount; child++) {
       const runId = `synthetic-${parent}-${child}`;
@@ -205,6 +204,7 @@ if (fixture) {
       }
     }
   }
+}
 function claim(entry: SubagentRunRecord, clock: number) {
   const token = registry.claimAgentRunContext(
     entry.runId,
@@ -416,8 +416,12 @@ try {
         node.callFrame.functionName === "resolveSessionChildOwners" ||
         node.callFrame.functionName === "resolveSessionChildController";
       allocation.total += node.selfSize;
-      if (owner) allocation.childOwner += node.selfSize;
-      for (const child of node.children) visit(child, owner);
+      if (owner) {
+        allocation.childOwner += node.selfSize;
+      }
+      for (const child of node.children) {
+        visit(child, owner);
+      }
     };
     visit(profile.head);
     allocatedBytes = allocation.total;
