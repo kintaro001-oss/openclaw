@@ -467,12 +467,14 @@ try {
                   if (values.trace) {
                     cdp.on("Tracing.dataCollected", collectTrace);
                     await cdp.send("Tracing.start", {
-                      categories: "toplevel,devtools.timeline,v8,disabled-by-default-v8.gc",
+                      categories:
+                        "toplevel,devtools.timeline,blink.user_timing,v8,disabled-by-default-v8.gc",
                       transferMode: "ReportEvents",
                     });
                     tracing = true;
                     await cdp.send("Profiler.enable");
                     await cdp.send("Profiler.start");
+                    await page.evaluate(() => performance.mark("openclaw-talk-sample"));
                   }
                   await page.evaluate(
                     (frames) => window.openclawTalkBench.start(frames),
@@ -572,16 +574,23 @@ try {
                   const frameGaps = proof.frameTimes
                     .slice(1)
                     .map((time, index) => time - proof.frameTimes[index]!);
-                  const gc = events
-                    .map(prepareColdLoadTraceEvent)
-                    .filter(
-                      ({ name, ph, ts }) =>
-                        ts >= interval.startUs &&
-                        ts < interval.endUs &&
-                        ph === "X" &&
-                        name !== undefined &&
-                        /(?:MinorGC|MajorGC|V8.GCScavenger|V8.GCCompactor)$/u.test(name),
-                    );
+                  const traceEvents = events.map(prepareColdLoadTraceEvent);
+                  const mainThread = traceEvents.find(
+                    ({ name }) => name === "openclaw-talk-sample",
+                  );
+                  if (values.trace && !mainThread) {
+                    throw new Error("Missing Talk page main-thread trace marker");
+                  }
+                  // Canonical top-level events exclude nested V8 phases and other renderers.
+                  const gc = traceEvents.filter(
+                    ({ name, ph, ts, dur, pid, tid }) =>
+                      pid === mainThread?.pid &&
+                      tid === mainThread.tid &&
+                      ts < interval.endUs &&
+                      ts + (dur ?? 0) > interval.startUs &&
+                      ph === "X" &&
+                      (name === "MinorGC" || name === "MajorGC"),
+                  );
                   Object.assign(row, {
                     status: "passed",
                     interval,
@@ -601,7 +610,14 @@ try {
                     gc: values.trace
                       ? {
                           count: gc.length,
-                          ms: gc.reduce((total, event) => total + (event.dur ?? 0), 0) / 1000,
+                          ms:
+                            gc.reduce(
+                              (total, event) =>
+                                total +
+                                Math.min(interval.endUs, event.ts + (event.dur ?? 0)) -
+                                Math.max(interval.startUs, event.ts),
+                              0,
+                            ) / 1000,
                         }
                       : undefined,
                     wakeups: wakeupDelta(beforeWakeups, afterWakeups),
