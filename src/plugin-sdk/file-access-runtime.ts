@@ -1,6 +1,23 @@
 import { removePathWithinRoot as removePathWithinRootCore } from "../infra/fs-safe-remove.js";
 import { statRegularFileSync as inspectRegularFileSync } from "../infra/fs-safe.js";
 
+// Public SDK compatibility for callers receiving legacy native fs.watch errors.
+export function getFileWatchCapacityCode(
+  error: unknown,
+): "EMFILE" | "ENFILE" | "ENOSPC" | undefined {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("syscall" in error) ||
+    error.syscall !== "watch" ||
+    !("code" in error)
+  ) {
+    return undefined;
+  }
+  const code = error.code;
+  return code === "EMFILE" || code === "ENFILE" || code === "ENOSPC" ? code : undefined;
+}
+
 /** Return whether a path resolves to a regular file, treating filesystem errors as missing. */
 export function fileExists(filePath: string): boolean {
   try {
@@ -48,7 +65,6 @@ export const removePathWithinRoot: (params: {
 }) => Promise<void> = removePathWithinRootCore;
 export { basenameFromMediaSource, safeFileURLToPath } from "@openclaw/fs-safe/advanced";
 export { isPathInside, isPathStrictlyInside } from "../infra/path-guards.js";
-export { getFileWatchCapacityCode } from "../infra/fs-watch-errors.js";
 export type { Root as ObservationRoot } from "@openclaw/fs-safe/root";
 export {
   watch,
