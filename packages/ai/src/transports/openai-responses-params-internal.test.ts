@@ -2,7 +2,6 @@ import type { Model } from "@openclaw/llm-core";
 import { describe, expect, it } from "vitest";
 import { makeProviderModel } from "../providers/provider-model.test-support.js";
 import {
-  buildOpenAIResponsesCompactSystemMessage,
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
 } from "./openai-responses-params-internal.js";
@@ -44,34 +43,6 @@ describe("sanitizeOpenAICodexResponsesParams", () => {
     });
 
     expect(params).toEqual({ store: true, max_output_tokens: 128 });
-  });
-});
-
-describe("buildOpenAIResponsesCompactSystemMessage", () => {
-  it("uses the developer role for reasoning models that support it", () => {
-    expect(
-      buildOpenAIResponsesCompactSystemMessage(reasoningModel, "Retain the conversation."),
-    ).toEqual({
-      type: "message",
-      role: "developer",
-      content: [{ type: "input_text", text: "Retain the conversation." }],
-    });
-  });
-
-  it("falls back to the system role for xAI's native route, which disables the developer role", () => {
-    const message = buildOpenAIResponsesCompactSystemMessage(
-      { ...reasoningModel, provider: "xai", baseUrl: "https://api.x.ai/v1" },
-      "Retain the conversation.",
-    );
-    expect(message.role).toBe("system");
-  });
-
-  it("uses the system role for non-reasoning models", () => {
-    const message = buildOpenAIResponsesCompactSystemMessage(
-      { ...reasoningModel, reasoning: false },
-      "Retain the conversation.",
-    );
-    expect(message.role).toBe("system");
   });
 });
 

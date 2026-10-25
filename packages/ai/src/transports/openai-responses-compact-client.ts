@@ -9,11 +9,17 @@ import {
 } from "./openai-responses-compaction-window.js";
 import type { OpenAIResponsesOptions } from "./openai-responses-contracts.js";
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
-import {
-  buildOpenAIResponsesCompactSystemMessage,
-  type buildOpenAIResponsesParams,
-} from "./openai-responses-params-internal.js";
-import { buildOpenAISdkRequestOptions } from "./openai-transport-params.js";
+import type { buildOpenAIResponsesParams } from "./openai-responses-params-internal.js";
+import { buildResponsesInputMessage } from "./openai-responses-replay-internal.js";
+import { buildOpenAISdkRequestOptions, getCompat } from "./openai-transport-params.js";
+
+// xAI /responses/compact needs the system prompt first in input, not instructions:
+// https://docs.x.ai/developers/advanced-api-usage/context-compaction
+function buildOpenAIResponsesCompactSystemMessage(model: Model, instructions: string) {
+  const compat = getCompat(model);
+  const role = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
+  return buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]);
+}
 
 export async function postOpenAIResponsesCompaction(params: {
   client: OpenAI;

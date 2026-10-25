@@ -169,3 +169,31 @@ it.each([
 ] as const)("resolves the %s gate", (_name, route, extraParams, enabled) => {
   expect(resolveOpenAIResponsesCompactEndpointPlan(route, extraParams).enabled).toBe(enabled);
 });
+
+it.each([
+  { name: "reasoning proxy", reasoning: true, xai: false, role: "developer" },
+  { name: "native xAI", reasoning: true, xai: true, role: "system" },
+  { name: "non-reasoning proxy", reasoning: false, xai: false, role: "system" },
+])("preserves the compact prompt role for $name", async ({ reasoning, xai, role }) => {
+  const route = xai
+    ? model
+    : {
+        ...officialOpenAIModel,
+        reasoning,
+        baseUrl: "https://responses.example/v1",
+        compat: { supportsInstructions: true, supportsDeveloperRole: true },
+      };
+  mockCompactResponse([compactionItem]);
+  await compact(route);
+  expectCompactBody({
+    model: route.id,
+    input: [
+      {
+        type: "message",
+        role,
+        content: [{ type: "input_text", text: "Retain the conversation." }],
+      },
+      ...context.messages.map(() => expect.objectContaining({ role: "user", type: "message" })),
+    ],
+  });
+});

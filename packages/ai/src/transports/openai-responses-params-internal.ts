@@ -82,14 +82,6 @@ function buildOpenAIResponsesInstructionsText(context: Context): string | undefi
   return sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(context.systemPrompt));
 }
 
-// xAI /responses/compact needs the system prompt first in input, not instructions:
-// https://docs.x.ai/developers/advanced-api-usage/context-compaction
-export function buildOpenAIResponsesCompactSystemMessage(model: Model, instructions: string) {
-  const compat = getCompat(model);
-  const role = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
-  return buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]);
-}
-
 export function buildOpenAIResponsesParams(
   model: Model,
   context: Context,
