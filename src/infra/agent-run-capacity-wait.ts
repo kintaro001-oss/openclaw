@@ -27,7 +27,7 @@ export function registerAgentRunCapacityWait(
   const waits = (context.capacityWaits ??= new Set());
   const token = Symbol("agent-run-capacity-wait");
   const publish = () => {
-    bumpAgentRunIndexVersion(context);
+    bumpAgentRunIndexVersion(context, undefined, runId);
     if (
       context.sessionKey &&
       context.projectSessionLifecycle !== false &&

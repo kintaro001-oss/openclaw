@@ -11,6 +11,7 @@ import { isRecord } from "../../packages/normalization-core/src/record-coerce.ts
 import type { SubagentRunReadRecord } from "../../src/agents/subagents/registry/subagent-registry-read.types.js";
 import type { SubagentRunRecord } from "../../src/agents/subagents/registry/subagent-registry.types.js";
 import type { SessionEntry } from "../../src/config/sessions/types.js";
+import type { SessionRowProjection } from "../../src/gateway/session-row-projection.js";
 import { createGatewayBenchEnv } from "../lib/gateway-bench-runtime.ts";
 import { parseStrictIntegerOption } from "../lib/strict-integer-option.ts";
 
@@ -22,27 +23,67 @@ const { values } = parseArgs({
     updates: { type: "string", default: "8000" },
     warmup: { type: "string", default: "1000" },
     mode: { type: "string", default: "timing" },
+    "team-shape": { type: "boolean", default: false },
+    sessions: { type: "string", default: "10800" },
+    workload: { type: "string", default: "owner" },
   },
 });
-const integer = (name: "parents" | "children" | "updates" | "warmup") =>
+const integer = (name: "parents" | "children" | "updates" | "warmup" | "sessions") =>
   parseStrictIntegerOption({ raw: values[name], label: `--${name}`, min: 1, fallback: 1 });
 const parentCount = integer("parents");
 const childCount = integer("children");
 const updates = integer("updates");
 const warmup = integer("warmup");
 assert.ok(values["state-dir"], "--state-dir must name a new isolated directory");
-assert.ok(values.mode === "timing" || values.mode === "allocation", "Invalid --mode");
+assert.ok(["timing", "allocation", "census"].includes(values.mode), "Invalid --mode");
+assert.ok(values.workload === "owner" || values.workload === "list", "Invalid --workload");
+assert.ok(values.workload !== "list" || values["team-shape"], "--workload list needs --team-shape");
 const collectGarbage = global.gc;
 assert.ok(collectGarbage, "Run with --expose-gc");
 const root = path.resolve(values["state-dir"]);
-mkdirSync(root, { mode: 0o700 });
-mkdirSync(path.join(root, "home"));
 const config = path.join(root, "openclaw.json");
-writeFileSync(config, JSON.stringify({ plugins: { enabled: false } }));
-process.env = {
-  ...createGatewayBenchEnv(path.join(root, "home"), config, { startupTrace: false }),
-  OPENCLAW_STATE_DIR: root,
-};
+const now = Date.UTC(2026, 9, 25);
+let fixture:
+  | Awaited<ReturnType<typeof import("./team-shape-fixture.ts").generateTeamShapeFixture>>
+  | undefined;
+if (values["team-shape"]) {
+  const { generateTeamShapeFixture, parseTeamShapeOptions } =
+    await import("./team-shape-fixture.ts");
+  const sessions = integer("sessions");
+  fixture = await generateTeamShapeFixture(
+    parseTeamShapeOptions([
+      "--state-dir",
+      root,
+      "--sessions",
+      String(sessions),
+      "--runs",
+      String(Math.floor((sessions * 4_300) / 10_800)),
+      "--team-stress",
+      "--settled-runs",
+      "--transcript-mib",
+      "0",
+      "--projects",
+      "0",
+      "--approvals",
+      "0",
+      "--cron",
+      "0",
+      "--now",
+      String(now),
+      "--seed",
+      "1711",
+    ]),
+  );
+  process.env = fixture.env;
+} else {
+  mkdirSync(root, { mode: 0o700 });
+  mkdirSync(path.join(root, "home"));
+  writeFileSync(config, JSON.stringify({ plugins: { enabled: false } }));
+  process.env = {
+    ...createGatewayBenchEnv(path.join(root, "home"), config, { startupTrace: false }),
+    OPENCLAW_STATE_DIR: root,
+  };
+}
 const memory = await import("../../src/agents/subagents/registry/subagent-registry-memory.js");
 const registry = await import("../../src/infra/agent-run-registry.js");
 const { publishSubagentRunChanges } =
@@ -50,61 +91,120 @@ const { publishSubagentRunChanges } =
 const { createSubagentSessionListReadIndex } =
   await import("../../src/agents/subagents/registry/subagent-registry-read-index.js");
 const { resolveSessionChildOwners } = await import("../../src/gateway/session-utils-core.js");
-const now = Date.UTC(2026, 9, 25);
 const parentKeys = Array.from({ length: parentCount }, (_, index) => `agent:main:parent-${index}`);
 const active: SubagentRunRecord[] = [];
 const claims = new Map<string, string>();
 const rows: Array<{ key: string; entry: SessionEntry }> = [];
 const snapshot = new Map<string, SubagentRunReadRecord>();
-for (let parent = 0; parent < parentCount; parent++) {
-  for (let child = 0; child < childCount; child++) {
-    const runId = `synthetic-${parent}-${child}`;
-    const key = `agent:main:subagent:${runId}`;
+let projection: SessionRowProjection | undefined;
+let listSessions:
+  | typeof import("../../src/gateway/session-utils-list.js").listProjectedSessions
+  | undefined;
+let releaseForeground: (() => void) | undefined;
+if (fixture) {
+  const { loadConfig, setRuntimeConfigSnapshot } = await import("../../src/config/config.js");
+  const { createSessionRowProjection } =
+    await import("../../src/gateway/session-row-projection.js");
+  const { retainSessionListForegroundWork } =
+    await import("../../src/gateway/session-projection-work.js");
+  const { createSubagentSessionListReadView } =
+    await import("../../src/agents/subagents/registry/subagent-registry-state.js");
+  const cfg = loadConfig();
+  setRuntimeConfigSnapshot(cfg);
+  releaseForeground = retainSessionListForegroundWork();
+  projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
+  await projection.ensureMaterialized();
+  rows.push(...projection.selectEntries().map(({ key, entry }) => ({ key, entry })));
+  assert.equal(rows.length, integer("sessions"), "Projection must retain every fixture row");
+  const sessions = new Map(rows.map((row) => [row.key, row.entry]));
+  const source = createSubagentSessionListReadView({ env: process.env });
+  await source.prepare();
+  for (const run of source.runs().values()) {
+    const child = sessions.get(run.childSessionKey);
+    assert.ok(child, "Registry child must belong to the generated fixture");
     const entry: SubagentRunRecord = {
-      runId,
-      childSessionKey: key,
-      childAgentId: "main",
-      childSessionIdentity: { sessionId: runId },
-      requesterSessionKey: parentKeys[parent]!,
+      ...run,
+      childSessionIdentity: {
+        sessionId: child.sessionId,
+        lifecycleRevision: child.lifecycleRevision,
+      },
       requesterAgentId: "main",
-      requesterDisplayKey: parentKeys[parent]!,
-      controllerSessionKey: parentKeys[parent]!,
+      requesterDisplayKey: run.requesterSessionKey,
       task: "Synthetic child-owner work",
       cleanup: "keep",
-      generation: 1,
-      createdAt: now - 1000,
-      execution:
-        child === 0
-          ? { status: "running", startedAt: now }
-          : {
-              status: "terminal",
-              startedAt: now - 1000,
-              endedAt: now - 500,
-              outcome: { status: "ok" },
-            },
-      cleanupCompletedAt: child === 0 ? undefined : now,
-      delivery: { status: "not_required" },
     };
-    memory.subagentRuns.set(runId, entry);
-    snapshot.set(runId, memory.immutableSubagentRunSessionList(entry));
-    if (child === 0) {
+    if (active.length < parentCount) {
+      entry.execution = { status: "running", startedAt: now };
+      entry.cleanupCompletedAt = undefined;
       active.push(entry);
+      parentKeys[active.length - 1] = entry.requesterSessionKey;
     }
-    if (child < 4) {
-      rows.push({
-        key,
-        entry: {
-          sessionId: runId,
-          updatedAt: now,
-          spawnedBy: parentKeys[parent],
-          spawnDepth: 1,
-          parentSessionKey: parentKeys[parent],
-          ...(child % 3 ? { archivedAt: now } : {}),
-        },
-      });
+    memory.subagentRuns.set(entry.runId, entry);
+    snapshot.set(entry.runId, memory.immutableSubagentRunSessionList(entry));
+  }
+  assert.equal(snapshot.size, Math.floor((integer("sessions") * 4_300) / 10_800));
+  assert.equal(active.length, parentCount, "Fixture needs enough records for churn");
+  if (values.workload === "list") {
+    ({ listProjectedSessions: listSessions } =
+      await import("../../src/gateway/session-utils-list.js"));
+    publishSubagentRunChanges();
+    await projection.ensureMaterialized();
+  } else {
+    projection.dispose();
+    projection = undefined;
+    releaseForeground();
+    releaseForeground = undefined;
+  }
+} else
+  for (let parent = 0; parent < parentCount; parent++) {
+    for (let child = 0; child < childCount; child++) {
+      const runId = `synthetic-${parent}-${child}`;
+      const key = `agent:main:subagent:${runId}`;
+      const entry: SubagentRunRecord = {
+        runId,
+        childSessionKey: key,
+        childAgentId: "main",
+        childSessionIdentity: { sessionId: runId },
+        requesterSessionKey: parentKeys[parent]!,
+        requesterAgentId: "main",
+        requesterDisplayKey: parentKeys[parent]!,
+        controllerSessionKey: parentKeys[parent]!,
+        task: "Synthetic child-owner work",
+        cleanup: "keep",
+        generation: 1,
+        createdAt: now - 1000,
+        execution:
+          child === 0
+            ? { status: "running", startedAt: now }
+            : {
+                status: "terminal",
+                startedAt: now - 1000,
+                endedAt: now - 500,
+                outcome: { status: "ok" },
+              },
+        cleanupCompletedAt: child === 0 ? undefined : now,
+        delivery: { status: "not_required" },
+      };
+      memory.subagentRuns.set(runId, entry);
+      snapshot.set(runId, memory.immutableSubagentRunSessionList(entry));
+      if (child === 0) {
+        active.push(entry);
+      }
+      if (child < 4) {
+        rows.push({
+          key,
+          entry: {
+            sessionId: runId,
+            updatedAt: now,
+            spawnedBy: parentKeys[parent],
+            spawnDepth: 1,
+            parentSessionKey: parentKeys[parent],
+            ...(child % 3 ? { archivedAt: now } : {}),
+          },
+        });
+      }
     }
   }
-}
 function claim(entry: SubagentRunRecord, clock: number) {
   const token = registry.claimAgentRunContext(
     entry.runId,
@@ -124,31 +224,39 @@ function claim(entry: SubagentRunRecord, clock: number) {
 for (const entry of active) {
   claim(entry, now);
 }
-const resident = createSubagentSessionListReadIndex(
-  {
-    snapshotIdentity: () => memory.subagentRuns,
-    runs(ids) {
-      if (!ids) {
-        return snapshot;
-      }
-      const selected = new Map<string, SubagentRunReadRecord>();
-      for (const id of ids) {
-        const entry = memory.subagentRuns.get(id);
-        if (entry) {
-          selected.set(id, memory.immutableSubagentRunSessionList(entry));
-        }
-      }
-      return selected;
-    },
-    prepare: async () => {},
-  },
-  now,
-);
+const resident =
+  values.workload === "owner"
+    ? createSubagentSessionListReadIndex(
+        {
+          snapshotIdentity: () => memory.subagentRuns,
+          runs(ids) {
+            if (!ids) {
+              return snapshot;
+            }
+            const selected = new Map<string, SubagentRunReadRecord>();
+            for (const id of ids) {
+              const entry = memory.subagentRuns.get(id);
+              if (entry) {
+                selected.set(id, memory.immutableSubagentRunSessionList(entry));
+              }
+            }
+            return selected;
+          },
+          prepare: async () => {},
+        },
+        now,
+      )
+    : undefined;
+const { parseAgentSessionKey } = await import("../../src/sessions/session-key-utils.js");
+const ownerRows = rows.map((row) => ({ ...row, parsedKey: parseAgentSessionKey(row.key) }));
 const lookup = memory.getSubagentSessionReadLookup(memory.subagentRuns);
 let previousTopology = lookup.captureTopology();
 let topologyChanges = 0;
 let checksum = 0;
 let sequence = 0;
+let ownerCpuMicros = 0;
+let ownerReads = 0;
+let returnedRows = 0;
 function updateRun() {
   const index = sequence % parentCount;
   const previous = active[index]!;
@@ -174,8 +282,25 @@ function updateRun() {
   publishSubagentRunChanges([entry.childSessionKey], [entry.runId]);
   sequence++;
 }
-function resolveList() {
+async function resolveList() {
+  if (projection && listSessions) {
+    const result = await listSessions({
+      projection,
+      opts: {
+        archived: "all",
+        limit: rows.length,
+        rowMode: "compact",
+        includeGlobal: true,
+        includeUnknown: true,
+      },
+    });
+    assert.equal(result.sessions.length, rows.length, "Every generated row must be presented");
+    returnedRows += result.sessions.length;
+    checksum += result.sessions.length + (result.totalCount ?? 0);
+    return;
+  }
   const clock = now + Math.floor((sequence * 1000) / 48);
+  assert.ok(resident);
   const index = resident.read(clock);
   const topology = lookup.captureTopology();
   if (topology !== previousTopology) {
@@ -185,9 +310,13 @@ function resolveList() {
   for (const key of parentKeys) {
     checksum += index.countActiveDescendantRuns(key);
   }
-  for (const row of rows) {
+  const before = process.threadCpuUsage();
+  for (const row of ownerRows) {
     checksum += resolveSessionChildOwners({ ...row, now: clock, subagentRuns: index }).length;
   }
+  const cpu = process.threadCpuUsage(before);
+  ownerCpuMicros += cpu.user + cpu.system;
+  ownerReads += rows.length;
 }
 async function run(count: number) {
   let completed = 0;
@@ -204,7 +333,7 @@ async function run(count: number) {
     let cpu = process.threadCpuUsage(before);
     updateCpuMicros += cpu.user + cpu.system;
     before = process.threadCpuUsage();
-    resolveList();
+    await resolveList();
     cpu = process.threadCpuUsage(before);
     resolutionCpuMicros += cpu.user + cpu.system;
     completed += batch;
@@ -232,9 +361,17 @@ try {
   gcEntries.length = 0;
   topologyChanges = 0;
   checksum = 0;
+  ownerCpuMicros = 0;
+  ownerReads = 0;
+  returnedRows = 0;
   const heapBefore = process.memoryUsage().heapUsed;
-  if (values.mode === "allocation") {
+  if (values.mode !== "timing") {
     inspector.connect();
+  }
+  if (values.mode === "census") {
+    await inspector.post("Profiler.enable");
+    await inspector.post("Profiler.startPreciseCoverage", { callCount: true, detailed: false });
+  } else if (values.mode === "allocation") {
     await inspector.post("HeapProfiler.startSampling", {
       samplingInterval: 32768,
       includeObjectsCollectedByMajorGC: true,
@@ -248,13 +385,43 @@ try {
   const ended = performance.now();
   await nextTurn();
   await nextTurn();
+  if (values.mode === "census") {
+    const { result } = await inspector.post("Profiler.takePreciseCoverage");
+    await inspector.post("Profiler.stopPreciseCoverage");
+    const calls = result
+      .filter((script) =>
+        /\/(session-row-presentation|session-utils-(core|row)|subagent-(registry-(memory|read)|child-owner-match|run-generation))\.ts$/.test(
+          script.url,
+        ),
+      )
+      .flatMap((script) =>
+        script.functions.map((fn) => ({
+          file: path.basename(script.url),
+          name: fn.functionName,
+          calls: fn.ranges[0]?.count ?? 0,
+          callsPerList: (fn.ranges[0]?.count ?? 0) / work.lists,
+        })),
+      );
+    writeFileSync(path.join(root, "calls.json"), JSON.stringify(calls, null, 2));
+  }
   let allocatedBytes: number | undefined;
+  let childOwnerAllocatedBytes: number | undefined;
   if (values.mode === "allocation") {
     const { profile } = await inspector.post("HeapProfiler.stopSampling");
     writeFileSync(path.join(root, "allocation.heapprofile"), JSON.stringify(profile));
-    const bytes = (node: HeapProfiler.SamplingHeapProfileNode): number =>
-      node.selfSize + node.children.reduce((total, child) => total + bytes(child), 0);
-    allocatedBytes = bytes(profile.head);
+    const allocation = { total: 0, childOwner: 0 };
+    const visit = (node: HeapProfiler.SamplingHeapProfileNode, childOwner = false): void => {
+      const owner =
+        childOwner ||
+        node.callFrame.functionName === "resolveSessionChildOwners" ||
+        node.callFrame.functionName === "resolveSessionChildController";
+      allocation.total += node.selfSize;
+      if (owner) allocation.childOwner += node.selfSize;
+      for (const child of node.children) visit(child, owner);
+    };
+    visit(profile.head);
+    allocatedBytes = allocation.total;
+    childOwnerAllocatedBytes = allocation.childOwner;
   }
   const gc: Record<string, { count: number; totalMs: number }> = {};
   for (const entry of gcEntries) {
@@ -275,15 +442,26 @@ try {
   collectGarbage();
   const result = {
     mode: values.mode,
+    workload: values.workload,
+    fixture: fixture?.summary,
     parentCount,
     childCount,
+    registryRows: memory.subagentRuns.size,
     rows: rows.length,
+    subagentRows: rows.filter(({ key }) => key.includes(":subagent:")).length,
     ...work,
     wallMs: ended - started,
     threadCpuMs: (cpu.user + cpu.system) / 1000,
     resolutionCpuMsPerList: work.resolutionCpuMicros / 1000 / work.lists,
     updateCpuMsPerUpdate: work.updateCpuMicros / 1000 / work.updates,
+    ownerCpuMsPerList: values.workload === "owner" ? ownerCpuMicros / 1000 / work.lists : undefined,
+    ownerReads,
+    returnedRows,
     allocatedBytes,
+    allocatedBytesPerList: allocatedBytes === undefined ? undefined : allocatedBytes / work.lists,
+    childOwnerAllocatedBytes,
+    childOwnerAllocatedBytesPerList:
+      childOwnerAllocatedBytes === undefined ? undefined : childOwnerAllocatedBytes / work.lists,
     allocatedBytesPerUpdate:
       allocatedBytes === undefined ? undefined : allocatedBytes / work.updates,
     gc,
@@ -298,9 +476,19 @@ try {
 } finally {
   observer.disconnect();
   inspector.disconnect();
-  resident.dispose();
+  resident?.dispose();
+  projection?.dispose();
+  releaseForeground?.();
   for (const [id, token] of claims) {
     registry.releaseAgentRunContext(id, token);
   }
   memory.subagentRuns.clear();
+  if (fixture) {
+    const { closeOpenClawAgentDatabasesAsync } =
+      await import("../../src/state/openclaw-agent-db.js");
+    const { closeOpenClawStateDatabaseAsync } =
+      await import("../../src/state/openclaw-state-db.js");
+    await closeOpenClawAgentDatabasesAsync();
+    await closeOpenClawStateDatabaseAsync();
+  }
 }

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { revokeGoalContinuationReturn } from "../../../auto-reply/reply/goal-continuation-return.js";
 import type { captureOperatorToolGatewayContinuationContext } from "../../../gateway/server-plugin-in-process-dispatch.js";
+import { subscribeAgentRunIndexChanges } from "../../../infra/agent-run-registry-state.js";
 import { prepareGatewayContextBindingOwner } from "../../../plugins/runtime/gateway-context-binding-owner.js";
 import {
   bindGatewayContextResolver,
@@ -9,6 +10,7 @@ import {
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
 import { transferFollowupCohort } from "../completion/session-followup-cohort.js";
+import { subscribeSwarmRunReservationChanges } from "../swarm/swarm-scheduler.js";
 import {
   matchesSubagentChildSessionOwner,
   resolveSubagentChildAgentId,
@@ -16,6 +18,10 @@ import {
 } from "./subagent-child-owner-match.js";
 import { projectSubagentRunForSessionList } from "./subagent-delivery-state.js";
 import { SUBAGENT_ENDED_REASON_KILLED } from "./subagent-lifecycle-events.js";
+import {
+  SubagentChildControllerIndex,
+  SubagentRunIndex,
+} from "./subagent-registry-memory-index.js";
 import {
   publishSubagentRunChanges,
   subscribeSubagentRunChanges,
@@ -144,56 +150,6 @@ export function freezeSubagentRunReadRecord<T extends SubagentRunReadRecord>(rec
   return record;
 }
 
-class SubagentRunIndex extends Map<string, Map<string, SubagentRunRecord>> {
-  private readonly latest = new Map<string, SubagentRunRecord>();
-
-  constructor(private readonly keyFor: (entry: SubagentRunRecord) => string | undefined) {
-    super();
-  }
-
-  update(runId: string, previous?: SubagentRunRecord, entry?: SubagentRunRecord): void {
-    const previousKey = previous && this.keyFor(previous);
-    const key = entry && this.keyFor(entry);
-    if (previousKey && previousKey !== key) {
-      const bucket = this.get(previousKey);
-      if (bucket?.get(runId) === previous) {
-        bucket.delete(runId);
-        if (bucket.size === 0) {
-          this.delete(previousKey);
-          this.latest.delete(previousKey);
-        } else if (this.latest.get(previousKey) === previous) {
-          for (const remaining of bucket.values()) {
-            this.latest.set(previousKey, remaining);
-          }
-        }
-      }
-    }
-    if (!key || !entry) {
-      return;
-    }
-    const bucket = this.get(key);
-    if (bucket) {
-      // Singleton status updates retain their bucket; larger groups keep replacement order.
-      if (bucket.size > 1) {
-        bucket.delete(runId);
-      }
-      bucket.set(runId, entry);
-    } else {
-      this.set(key, new Map([[runId, entry]]));
-    }
-    this.latest.set(key, entry);
-  }
-
-  getLatest(key: string): SubagentRunRecord | undefined {
-    return this.latest.get(key);
-  }
-
-  override clear(): void {
-    super.clear();
-    this.latest.clear();
-  }
-}
-
 // Preflight consults the collector lookup on every Gateway agent request, so it
 // must stay O(1) regardless of retained collector records. The map subclass
 // maintains the index whenever the row owner publishes a new immutable value.
@@ -211,6 +167,35 @@ const runIndexes = [
   runsByRequesterSessionKey,
   runsByCollectorGroupKey,
 ];
+
+export const subagentChildControllers = new SubagentChildControllerIndex(
+  childSessionCandidatesByKey,
+);
+
+function refreshControllerOwner(runId?: string): void {
+  if (runId === undefined) {
+    for (const child of childSessionCandidatesByKey.keys()) {
+      subagentChildControllers.refresh(child);
+    }
+  } else {
+    const entry = subagentRuns.get(runId);
+    if (entry) {
+      subagentChildControllers.refresh(entry.childSessionKey);
+    }
+  }
+}
+
+subscribeAgentRunIndexChanges(refreshControllerOwner);
+subscribeSwarmRunReservationChanges((runId) => {
+  if (runId === undefined) {
+    refreshControllerOwner();
+  } else {
+    // A scheduler slot retains its address across accepted execution run ids.
+    for (const id of subagentRuns.readLookup.selectRunIds(new Set([runId]))) {
+      refreshControllerOwner(id);
+    }
+  }
+});
 
 function childSessionOwnerKey(entry: {
   childSessionKey: string;
@@ -634,6 +619,10 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
     for (const index of runIndexes) {
       index.update(runId, prev, entry);
     }
+    if (prev && prev.childSessionKey !== entry.childSessionKey) {
+      subagentChildControllers.refresh(prev.childSessionKey);
+    }
+    subagentChildControllers.refresh(entry.childSessionKey);
     this.workIndex.set(runId, entry);
     return this;
   }
@@ -646,6 +635,7 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
       for (const index of runIndexes) {
         index.update(runId, prev);
       }
+      subagentChildControllers.refresh(prev.childSessionKey);
     }
     return super.delete(runId);
   }
@@ -666,6 +656,7 @@ class SubagentRunMap extends Map<string, SubagentRunRecord> {
     for (const index of runIndexes) {
       index.clear();
     }
+    subagentChildControllers.clear();
     this.workIndex.clear();
     publishSubagentRunChanges();
   }

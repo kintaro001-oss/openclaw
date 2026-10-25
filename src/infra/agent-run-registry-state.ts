@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { registerListener } from "../shared/listeners.js";
 import type {
   AgentRunContext,
   AgentRunContextOwnership,
@@ -9,6 +10,12 @@ import type {
 } from "./agent-run-registry.types.js";
 
 const AGENT_RUN_REGISTRY_STATE_KEY = Symbol.for("openclaw.agentRunRegistry.state");
+const indexListeners = new Set<(runId: string | undefined) => void>();
+
+/** Install derived live ownership before session observers consume the new version. */
+export function subscribeAgentRunIndexChanges(listener: (runId: string | undefined) => void) {
+  return registerListener(indexListeners, listener);
+}
 
 const registryState = resolveGlobalSingleton<AgentRunRegistryState>(
   AGENT_RUN_REGISTRY_STATE_KEY,
@@ -71,8 +78,12 @@ export function getAgentRunContextOwnerStatus(
 export function bumpAgentRunIndexVersion(
   context?: AgentRunContext,
   previous?: AgentRunContext,
+  runId?: string,
 ): void {
   getAgentRunRegistryState().version += 1;
+  for (const listener of indexListeners) {
+    listener(runId);
+  }
   for (const target of previous &&
   (previous.sessionKey !== context?.sessionKey ||
     (!previous.sessionKey && previous.sessionId !== context?.sessionId) ||
