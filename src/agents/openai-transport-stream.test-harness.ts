@@ -6,9 +6,6 @@ import { createZeroUsageFixture } from "./test-helpers/usage-fixtures.js";
 
 export const buildOpenAIResponsesParams: typeof testing.buildOpenAIResponsesParams =
   testing.buildOpenAIResponsesParams;
-export const resolveAzureOpenAIApiVersion: typeof testing.resolveAzureOpenAIApiVersion =
-  testing.resolveAzureOpenAIApiVersion;
-
 export type OpenAIResponsesOutput = Parameters<typeof testing.processResponsesStream>[1];
 
 type ResponsesApi = Extract<

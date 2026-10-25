@@ -58,7 +58,6 @@ import { supportsResponsesReasoningUpdate } from "./openai-responses-reasoning-u
 import {
   createOpenAIResponsesAssistantOutput,
   createResponsesStreamWithRecovery,
-  resolveAzureOpenAIApiVersion,
 } from "./openai-responses-replay-internal.js";
 import { createResponsesRequestFetch } from "./openai-responses-request-fetch.js";
 import {
@@ -709,6 +708,6 @@ function createAzureOpenAIClient(
 
   return new AzureOpenAI({
     ...clientOptions,
-    apiVersion: resolveAzureOpenAIApiVersion(),
+    apiVersion: process.env.AZURE_OPENAI_API_VERSION?.trim() || "preview",
   });
 }

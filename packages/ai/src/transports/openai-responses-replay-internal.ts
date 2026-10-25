@@ -466,10 +466,6 @@ export async function createResponsesStreamWithRecovery(params: {
   };
 }
 
-export function resolveAzureOpenAIApiVersion(env = process.env): string {
-  return env.AZURE_OPENAI_API_VERSION?.trim() || "preview";
-}
-
 export {
   buildResponsesInputMessage,
   convertProviderResponsesMessages,

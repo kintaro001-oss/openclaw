@@ -38,7 +38,6 @@ import {
 } from "../../../plugins/official-runtime-plugins.js";
 import { safeRealpathSync } from "../../../plugins/path-safety.js";
 import { isPayloadMissing } from "../../../plugins/payload-verification.js";
-import type { PluginMetadataSnapshot } from "../../../plugins/plugin-metadata-snapshot.types.js";
 import { resolveProviderInstallCatalogEntries } from "../../../plugins/provider-install-catalog.js";
 import {
   buildManagedPluginDependencyStatus,
@@ -48,67 +47,6 @@ import { resolveUserPath } from "../../../utils.js";
 import { resolveCompatibilityHostVersion } from "../../../version.js";
 import { collectEffectiveConfiguredChannelOwnerPluginIds } from "./missing-configured-plugin-install.ids.js";
 import { shouldDeferConfiguredPluginInstallRepair } from "./update-phase.js";
-
-/** Collects dependency failures only for enabled, canonically recorded npm installs. */
-function collectInstalledPluginMissingRequiredDependencies(params: {
-  cfg: OpenClawConfig;
-  isRepairTarget: (pluginId: string) => boolean;
-  snapshot: PluginMetadataSnapshot;
-  installRecords: Record<string, PluginInstallRecord>;
-  blockedPluginIds?: ReadonlySet<string>;
-  resolvePathIdentity: (value: string) => string;
-}) {
-  const missing = new Map<string, { rootDir: string; missingRequired: string[] }>();
-  const config = normalizePluginsConfig(params.cfg.plugins);
-  for (const plugin of params.snapshot.plugins) {
-    const record = Object.hasOwn(params.installRecords, plugin.id)
-      ? params.installRecords[plugin.id]
-      : undefined;
-    if (
-      !params.isRepairTarget(plugin.id) ||
-      plugin.origin === "bundled" ||
-      params.blockedPluginIds?.has(plugin.id) ||
-      record?.source !== "npm" ||
-      !record.installPath?.trim() ||
-      !record.spec?.trim()
-    ) {
-      continue;
-    }
-    const spec = parseRegistryNpmSpec(record.spec);
-    if (
-      !spec ||
-      plugin.packageName !== spec.name ||
-      (record.resolvedName && record.resolvedName !== spec.name) ||
-      !resolveEffectiveEnableState({
-        id: plugin.id,
-        origin: plugin.origin,
-        config,
-        rootConfig: params.cfg,
-        enabledByDefault: plugin.enabledByDefault,
-        channelIds: plugin.channels,
-      }).enabled
-    ) {
-      continue;
-    }
-    const rootDir = params.resolvePathIdentity(plugin.rootDir);
-    if (rootDir !== params.resolvePathIdentity(record.installPath)) {
-      continue;
-    }
-    const { missing: missingRequired } = buildManagedPluginDependencyStatus({
-      rootDir,
-      dependencyRootDir:
-        resolveRetainedManagedNpmInstallPackageInfo(rootDir)?.projectRoot ?? rootDir,
-      ...normalizePluginDependencySpecs({
-        dependencies: plugin.packageDependencies,
-        optionalDependencies: plugin.packageOptionalDependencies,
-      }),
-    });
-    if (missingRequired.length > 0) {
-      missing.set(plugin.id, { rootDir, missingRequired });
-    }
-  }
-  return missing;
-}
 
 export type DownloadableInstallCandidate = Pick<
   PluginPackageInstall,
@@ -277,15 +215,59 @@ export async function resolveConfiguredPluginInstallContext(params: {
     }
     return pluginIds;
   })();
-  const installedPluginMissingRequiredDependencies =
-    collectInstalledPluginMissingRequiredDependencies({
-      cfg: params.cfg,
-      isRepairTarget,
-      snapshot,
-      installRecords: records,
-      blockedPluginIds: params.blockedPluginIds,
-      resolvePathIdentity,
+  /** Collects dependency failures only for enabled, canonically recorded npm installs. */
+  const dependencyConfig = params.cfg;
+  const dependencyBlockedPluginIds = params.blockedPluginIds;
+  const installedPluginMissingRequiredDependencies = new Map<
+    string,
+    { rootDir: string; missingRequired: string[] }
+  >();
+  const dependencyPluginConfig = normalizePluginsConfig(dependencyConfig.plugins);
+  for (const plugin of snapshot.plugins) {
+    const record = Object.hasOwn(records, plugin.id) ? records[plugin.id] : undefined;
+    if (
+      !isRepairTarget(plugin.id) ||
+      plugin.origin === "bundled" ||
+      dependencyBlockedPluginIds?.has(plugin.id) ||
+      record?.source !== "npm" ||
+      !record.installPath?.trim() ||
+      !record.spec?.trim()
+    ) {
+      continue;
+    }
+    const spec = parseRegistryNpmSpec(record.spec);
+    if (
+      !spec ||
+      plugin.packageName !== spec.name ||
+      (record.resolvedName && record.resolvedName !== spec.name) ||
+      !resolveEffectiveEnableState({
+        id: plugin.id,
+        origin: plugin.origin,
+        config: dependencyPluginConfig,
+        rootConfig: dependencyConfig,
+        enabledByDefault: plugin.enabledByDefault,
+        channelIds: plugin.channels,
+      }).enabled
+    ) {
+      continue;
+    }
+    const rootDir = resolvePathIdentity(plugin.rootDir);
+    if (rootDir !== resolvePathIdentity(record.installPath)) {
+      continue;
+    }
+    const { missing: missingRequired } = buildManagedPluginDependencyStatus({
+      rootDir,
+      dependencyRootDir:
+        resolveRetainedManagedNpmInstallPackageInfo(rootDir)?.projectRoot ?? rootDir,
+      ...normalizePluginDependencySpecs({
+        dependencies: plugin.packageDependencies,
+        optionalDependencies: plugin.packageOptionalDependencies,
+      }),
     });
+    if (missingRequired.length > 0) {
+      installedPluginMissingRequiredDependencies.set(plugin.id, { rootDir, missingRequired });
+    }
+  }
   const installedPluginIdsWithRepairablePackages = new Set([
     ...installedPluginIdsWithRepairablePackageDiagnostics,
     ...installedPluginIdsWithStaleVersionBoundRuntimePackages,

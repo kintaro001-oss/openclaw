@@ -4,7 +4,6 @@ import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { createAssistantOutput } from "../../packages/ai/src/transports/assistant-output.js";
 import { logResponsesFailedNoDetails } from "../../packages/ai/src/transports/openai-responses-debug.js";
 import {
-  resolveAzureOpenAIApiVersion,
   makeResponsesModel,
   createResponsesAssistantOutput,
   createAzureResponsesModel,
@@ -210,40 +209,40 @@ describe("openai transport stream", () => {
     expect(headers.accept).toBeUndefined();
   });
 
-  it("uses a valid Azure API version default when the environment is unset", () => {
-    expect(resolveAzureOpenAIApiVersion({})).toBe("preview");
-    expect(resolveAzureOpenAIApiVersion({ AZURE_OPENAI_API_VERSION: "2025-01-01-preview" })).toBe(
-      "2025-01-01-preview",
-    );
-  });
-
-  it("preserves Azure routing and prepared headers", async () => {
-    vi.stubEnv("AZURE_OPENAI_API_VERSION", "preview");
-    const baseUrl = "https://example.openai.azure.com";
-    const model = { ...createAzureResponsesModel(), baseUrl };
-    const requests: Request[] = [];
-    vi.spyOn(getAiTransportHost(), "buildModelFetch").mockReturnValue(async (input, init) => {
-      requests.push(new Request(input, init));
-      return new Response(`data: ${JSON.stringify(completed())}\n\n`, {
-        headers: { "content-type": "text/event-stream" },
+  it.each([
+    { apiVersion: "preview", expectedApiVersion: "preview" },
+    { apiVersion: undefined, expectedApiVersion: "preview" },
+    { apiVersion: "2025-01-01-preview", expectedApiVersion: "2025-01-01-preview" },
+  ])(
+    "preserves Azure routing and prepared headers ($apiVersion)",
+    async ({ apiVersion, expectedApiVersion }) => {
+      vi.stubEnv("AZURE_OPENAI_API_VERSION", apiVersion);
+      const baseUrl = "https://example.openai.azure.com";
+      const model = { ...createAzureResponsesModel(), baseUrl };
+      const requests: Request[] = [];
+      vi.spyOn(getAiTransportHost(), "buildModelFetch").mockReturnValue(async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(`data: ${JSON.stringify(completed())}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        });
       });
-    });
-    const stream = await createAzureOpenAIResponsesTransportStreamFn()(
-      model,
-      { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-      { apiKey: "test-key", headers: { session_id: "prepared-affinity" } },
-    );
-    const result = await stream.result();
-    expect(result.stopReason).toBe("stop");
-    expect(requests).toHaveLength(1);
-    const request = requests[0];
-    assert(request);
-    const url = new URL(request.url);
-    expect(url.origin + url.pathname).toBe(`${baseUrl}/responses`);
-    expect(url.searchParams.get("api-version")).toBe("preview");
-    expect(request.headers.get("api-key")).toBe("test-key");
-    expect(request.headers.get("session_id")).toBe("prepared-affinity");
-  });
+      const stream = await createAzureOpenAIResponsesTransportStreamFn()(
+        model,
+        { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+        { apiKey: "test-key", headers: { session_id: "prepared-affinity" } },
+      );
+      const result = await stream.result();
+      expect(result.stopReason).toBe("stop");
+      expect(requests).toHaveLength(1);
+      const request = requests[0];
+      assert(request);
+      const url = new URL(request.url);
+      expect(url.origin + url.pathname).toBe(`${baseUrl}/responses`);
+      expect(url.searchParams.get("api-version")).toBe(expectedApiVersion);
+      expect(request.headers.get("api-key")).toBe("test-key");
+      expect(request.headers.get("session_id")).toBe("prepared-affinity");
+    },
+  );
 
   it("does not replay terminal text that already streamed", async () => {
     const output = await streamOutput([
