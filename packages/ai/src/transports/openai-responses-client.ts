@@ -32,7 +32,6 @@ import {
   type ResponsesContinuationRequest,
 } from "./openai-responses-continuation.js";
 import {
-  AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,
   OpenAIResponsesWebSocketPostDispatchError,
   responsesServiceTierObserver,
   type OpenAIResponsesOptions,
@@ -673,7 +672,7 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
 export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
   return createResponsesTransportExecutor({
     outputApi: "azure-openai-responses",
-    firstEventTimeoutMs: AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,
+    firstEventTimeoutMs: 30_000,
     createClient: createAzureOpenAIClient,
     buildRequest: (model, context, options, metadata, replayMode) => {
       const deploymentName = resolveAzureDeploymentNameFromMap({

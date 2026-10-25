@@ -2,7 +2,6 @@ import type { Model } from "@openclaw/llm-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { readTransportDiagnosticLabel } from "../utils/provider-error.js";
 import { resolveModelPayloadDebugMode } from "./model-transport-debug.js";
-import { RESPONSE_FAILED_NO_DETAILS_MESSAGE } from "./openai-responses-contracts.js";
 import { log } from "./openai-transport-shared.js";
 import { redactIdentifier, sha256Hex } from "./transport-utils.js";
 
@@ -259,7 +258,7 @@ export function normalizeResponsesFailedEvent(
     return buildResponsesFailedEventSummary(`incomplete: ${incompleteReason}`, responseId);
   }
   return buildResponsesFailedEventSummary(
-    RESPONSE_FAILED_NO_DETAILS_MESSAGE,
+    "Unknown error (no error details in response)",
     responseId,
     undefined,
     buildResponsesFailedNoDetailsObservation(event, model, response),

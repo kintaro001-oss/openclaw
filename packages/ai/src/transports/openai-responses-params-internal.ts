@@ -20,8 +20,6 @@ import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-bou
 import { usesNativeOpenAICodexResponsesBackend } from "./openai-completions-compat.js";
 import type { OpenAIResponsesReplayMode } from "./openai-responses-compaction-replay.js";
 import {
-  OPENAI_CODEX_RESPONSES_DEFAULT_INSTRUCTIONS,
-  OPENAI_CODEX_RESPONSES_EMPTY_INPUT_TEXT,
   OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
   type OpenAIResponsesOptions,
   type OpenAIResponsesRequestParams,
@@ -126,11 +124,7 @@ export function buildOpenAIResponsesParams(
         "OpenAI Responses requires non-empty input when only systemPrompt is provided.",
       );
     }
-    messages.push(
-      buildResponsesInputMessage("user", [
-        { type: "input_text", text: OPENAI_CODEX_RESPONSES_EMPTY_INPUT_TEXT },
-      ]),
-    );
+    messages.push(buildResponsesInputMessage("user", [{ type: "input_text", text: " " }]));
   }
   const cacheRetention = resolveCacheRetention(options?.cacheRetention);
   const compat = getCompat(model);
@@ -144,7 +138,7 @@ export function buildOpenAIResponsesParams(
     : undefined;
   if (payloadPolicy.usesInstructionsField && (!instructions || instructions.trim().length === 0)) {
     instructions = usesNativeOpenAICodexResponsesBackend(model)
-      ? OPENAI_CODEX_RESPONSES_DEFAULT_INSTRUCTIONS
+      ? "Follow the user request."
       : undefined;
   }
   const params: OpenAIResponsesRequestParams = {
