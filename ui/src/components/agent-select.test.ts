@@ -347,12 +347,22 @@ it.each(["fetch", "body"] as const)(
   },
 );
 
-it("leaves an ambient same-origin avatar in the browser image cache", async () => {
-  const fetchMock = vi.fn();
+it("fetches an unknown local avatar without an authorization header", async () => {
+  stubAvatarUrls("blob:unauthenticated-avatar");
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValue(
+      new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } }),
+    );
   vi.stubGlobal("fetch", fetchMock);
   const element = await createAvatarSelect();
-  expect(avatarSrc(element)).toBe(`${globalThis.location.origin}/avatar/alpha`);
-  expect(fetchMock).not.toHaveBeenCalled();
+  await waitForFast(() =>
+    expect(fetchMock).toHaveBeenCalledWith(`${location.origin}/avatar/alpha`, {
+      credentials: "include",
+      signal: expect.any(AbortSignal),
+    }),
+  );
+  await waitForFast(() => expect(avatarSrc(element)).toBe("blob:unauthenticated-avatar"));
 });
 
 it("keeps avatar text out of typeahead and announces option metadata", async () => {

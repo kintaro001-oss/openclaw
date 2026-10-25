@@ -46,12 +46,14 @@ it.each([false, true])(
   async (authenticated) => {
     if (authenticated) {
       setAvatarGatewayOrigin("https://gateway.example.test", ["avatar-token"]);
-      vi.spyOn(globalThis, "fetch").mockImplementation(
-        async () =>
-          new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } }),
-      );
-      vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:solid-avatar");
+    } else {
+      setAvatarGatewayOrigin(location.origin);
     }
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } }),
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:solid-avatar");
     const [user, setUser] = createSignal<ViewerAvatarProps["user"]>({
       id: "profile-ada",
       name: "Ada",
@@ -62,10 +64,8 @@ it.each([false, true])(
     const avatar = () => container.querySelector<HTMLElement>(".viewer-avatar")!;
     const image = container.querySelector("img")!;
     expect(image).not.toBeNull();
-    expect(avatar().classList.contains("is-pending")).toBe(authenticated);
-    if (authenticated) {
-      await waitForSolid(() => expect(image.getAttribute("src")).toBe("blob:solid-avatar"));
-    }
+    expect(avatar().classList.contains("is-pending")).toBe(true);
+    await waitForSolid(() => expect(image.getAttribute("src")).toBe("blob:solid-avatar"));
     image.dispatchEvent(new Event("load"));
     flush();
     expect(avatar().dataset.avatarState).toBe("loaded");
@@ -77,7 +77,7 @@ it.each([false, true])(
     setUser((previous) => ({ ...previous!, avatarUrl: "/api/users/profile-ada/avatar?v=2" }));
     flush();
     expect(container.querySelector("img")).toBe(image);
-    expect(avatar().dataset.avatarState).toBe(authenticated ? "pending" : "loaded");
+    expect(avatar().dataset.avatarState).toBe("pending");
   },
 );
 

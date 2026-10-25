@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, onSettled, type Accessor } from "solid-js";
-import { retainAvatarImageUrl } from "../../lib/identity-avatar-loader.ts";
+import { recordAvatarImageError, retainAvatarImageUrl } from "../../lib/identity-avatar-loader.ts";
 import { listen } from "../../lib/reactive/listener.ts";
 
 type IdentityAvatarImageProps = {
@@ -56,6 +56,7 @@ export function IdentityAvatarImage(props: IdentityAvatarImageProps) {
   };
   const load = () => state("loaded");
   const error = () => {
+    recordAvatarImageError(activeSource);
     state("failed");
     props.onImageError?.();
   };

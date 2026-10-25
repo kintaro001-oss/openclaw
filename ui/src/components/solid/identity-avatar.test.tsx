@@ -2,6 +2,7 @@ import { createSignal, flush, Show } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { setAvatarGatewayOrigin } from "../../lib/identity-avatar-context.ts";
+import { resolveAvatarImageUrl } from "../../lib/identity-avatar-loader.ts";
 import type { AgentIdentity } from "../../lib/identity-avatar-view.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { IdentityAvatarImage, createIdentityAvatarPresentation } from "./identity-avatar-image.tsx";
@@ -29,14 +30,23 @@ function TestImage(props: { source: string | Promise<string | null> | null }) {
   );
 }
 
-it("presents a known same-origin portrait without a decode-state transition", () => {
+it("presents a resolved portrait without a decode-state transition", async () => {
   setAvatarGatewayOrigin(location.origin);
   try {
-    const fetchAvatar = vi.spyOn(globalThis, "fetch");
+    const fetchAvatar = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } }),
+      );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:resolved-portrait");
+    await expect(resolveAvatarImageUrl("/avatar/forge?v=1")).resolves.toBe(
+      "blob:resolved-portrait",
+    );
+    fetchAvatar.mockClear();
     const view = mountSolid(() => <Avatar agent={{ id: "forge", avatar: "/avatar/forge?v=1" }} />);
     const frame = view.container.querySelector(".identity-avatar--agent")!;
     const image = frame.querySelector("img")!;
-    expect(image.getAttribute("src")).toBe(`${location.origin}/avatar/forge?v=1`);
+    expect(image.getAttribute("src")).toBe("blob:resolved-portrait");
     expect(frame.getAttribute("data-avatar-state")).toBe("loaded");
     const mutations = observe(frame, { attributes: true, childList: true, subtree: true });
     image.dispatchEvent(new Event("load"));
@@ -135,10 +145,10 @@ it("preserves prepared avatar state and image errors", () => {
   flush();
   expect(mutations()).toHaveLength(0);
 
-  setAgent((current) => ({ ...current, avatar: "/avatar/sidebar-synthetic", pending: false }));
+  setAgent((current) => ({ ...current, avatar: "blob:sidebar-synthetic", pending: false }));
   flush();
   const image = view.container.querySelector("img")!;
-  expect(image?.getAttribute("src")).toBe("/avatar/sidebar-synthetic");
+  expect(image?.getAttribute("src")).toBe("blob:sidebar-synthetic");
   expect(view.container.querySelector(".avatar")).toBe(face);
   image.dispatchEvent(new Event("error"));
   flush();
