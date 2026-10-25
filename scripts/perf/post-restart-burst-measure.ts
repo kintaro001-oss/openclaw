@@ -80,6 +80,7 @@ if (port > 65535 || mockPort > 65535 || port === mockPort) {
 const reconnectWaves = values["reconnect-waves"];
 const coldRowReads = values["cold-row-reads"];
 const startupAdmission = values["startup-admission"];
+const startupTrace = process.env.OPENCLAW_GATEWAY_STARTUP_TRACE === "1";
 const reloadLatency = values["from-listening"]
   ? resolveColdLoadLatency({
       profile: "live-fast",
@@ -778,7 +779,7 @@ if (isMainThread) {
 );
 const env = {
   ...createGatewayBenchEnv(path.join(root, "home"), configPath, {
-    startupTrace: values["from-listening"],
+    startupTrace,
   }),
   OPENCLAW_STATE_DIR: root,
   TMPDIR: path.join(root, "tmp"),
@@ -2312,6 +2313,7 @@ async function measureColdRowReads(
     output,
     fixture,
     scenario: startupAdmission ? "startup-admission" : "cold-row-reads",
+    startupTrace,
     reconnectBoundary: values["from-listening"] ? "listening" : "ready",
     ...(reloadLatency ? { reloadLatency } : {}),
     listeningMs: listeners.get(restarted)! - restartAt,

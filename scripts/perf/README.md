@@ -932,6 +932,9 @@ and chooses shared, unarchived keys from its recorded stress targets. Its
 a benchmark-only request timestamp; no request payload or durable identifier is
 captured. The source hook fails if that identity is missing. Compare identical
 instrumentation on both revisions; these records do not change product telemetry.
+Startup tracing stays off for cost comparisons. Set the existing
+`OPENCLAW_GATEWAY_STARTUP_TRACE=1` only for separate attribution runs; the result
+records whether it was enabled.
 
 Use `--request-start-owner /path/to/request-start.ts` to compare scheduler
 revisions in the same installation. The source loader verifies the selected
