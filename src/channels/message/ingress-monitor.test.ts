@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { waitForAbortSignal as waitForAbort } from "../../infra/abort-signal.js";
+import { createChannelIngressError } from "../../plugin-sdk/channel-outbound.js";
 import {
   GatewayDrainingError,
   isGatewaySubordinateWorkAdmissionClosed,
@@ -11,7 +12,6 @@ import {
 } from "../../process/gateway-work-admission.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { createChannelIngressDrain } from "./ingress-drain.js";
-import { createChannelIngressError } from "./ingress-errors.js";
 import {
   CHANNEL_INGRESS_RETENTION_DEFAULTS,
   createChannelIngressMonitor,

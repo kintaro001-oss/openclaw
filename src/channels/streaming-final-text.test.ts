@@ -3,7 +3,7 @@ import { setReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
 import {
   resolveTranscriptBackedChannelFinalText,
   selectLongerFinalText,
-} from "./streaming-final-text.js";
+} from "../plugin-sdk/channel-outbound.js";
 
 describe("channel final text recovery", () => {
   it("keeps complete replies with long blank runs without stalling or reading candidates", async () => {

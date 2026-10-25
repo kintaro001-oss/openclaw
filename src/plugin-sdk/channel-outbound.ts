@@ -1,17 +1,503 @@
+import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
+import { resolveTextChunkLimit } from "../auto-reply/chunk.js";
+import {
+  getReplyPayloadMetadata,
+  type ReplyPayload as CoreReplyPayload,
+} from "../auto-reply/reply-payload.js";
 import type {
   DurableMessageBatchSendResult,
   DurableMessageSendContext,
   DurableMessageSendContextParams,
 } from "../channels/message/runtime.js";
 import {
+  type ChannelMessageAdapterShape,
+  type ChannelMessageLiveCapability,
+  type ChannelMessageReceiveAckPolicy,
+  type DurableFinalDeliveryCapability,
+  type DurableFinalDeliveryRequirementMap,
+  type LivePreviewFinalizerCapability,
+  channelMessageLiveCapabilities,
+  channelMessageReceiveAckPolicies,
+  durableFinalDeliveryCapabilities,
+  livePreviewFinalizerCapabilities,
+} from "../channels/message/types.js";
+import type { ChannelId } from "../channels/plugins/types.core.js";
+import {
   resolveChannelProgressDraftConfig as readProgressDraftConfig,
   type StreamingCompatEntry as ProgressDraftCompatEntry,
+  resolveChannelStreamingPreviewChunk,
+  type StreamingCompatEntry,
 } from "../channels/streaming.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { classifyGatewayStaleInstall } from "../gateway/stale-install.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { PlatformMessageNotDispatchedError } from "../infra/outbound/deliver-types.js";
 import { preserveReplyPayloadMediaSelectionCore } from "../infra/outbound/reply-media-entries.js";
+import { resolveChannelAccountEntry } from "../routing/account-lookup.js";
+import { normalizeAccountId } from "../routing/session-key.js";
+import type { RuntimeEnv } from "../runtime.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import type { ReplyPayload } from "./reply-payload.js";
+
+const MIN_TRUNCATED_FINAL_PREFIX_CHARS = 48;
+const MIN_TRUNCATED_FINAL_CONTINUATION_CHARS = 24;
+
+function stripTrailingEllipsis(text: string): string {
+  // Start at a whitespace-run boundary instead of retrying every blank line.
+  return text.replace(/(?<!\s)(?:\s*(?:\.{3}|\u2026))+$/u, "").trimEnd();
+}
+
+export function isPotentialTruncatedFinal(finalText: string): boolean {
+  const trimmedFinal = finalText.trimEnd();
+  const untruncatedFinal = stripTrailingEllipsis(trimmedFinal);
+  return (
+    untruncatedFinal.length >= MIN_TRUNCATED_FINAL_PREFIX_CHARS && untruncatedFinal !== trimmedFinal
+  );
+}
+
+export function selectLongerFinalText(params: {
+  finalText: string;
+  candidateTexts: readonly (string | undefined)[];
+}): string | undefined {
+  const finalText = params.finalText.trimEnd();
+  if (!isPotentialTruncatedFinal(finalText)) {
+    return undefined;
+  }
+  const untruncatedFinal = stripTrailingEllipsis(finalText);
+  for (const candidate of params.candidateTexts) {
+    const candidateText = candidate?.trimEnd();
+    if (
+      !candidateText ||
+      candidateText.length <= finalText.length ||
+      !candidateText.startsWith(untruncatedFinal)
+    ) {
+      continue;
+    }
+    const continuation = candidateText.slice(untruncatedFinal.length).trimStart();
+    if (
+      continuation.length >= MIN_TRUNCATED_FINAL_CONTINUATION_CHARS &&
+      /^[\p{L}\p{N}]/u.test(continuation)
+    ) {
+      return candidateText;
+    }
+  }
+  return undefined;
+}
+
+export async function resolveTranscriptBackedChannelFinalText(params: {
+  // Optional: shipped plugin callers pass only text; an answer to a preceding input keeps its own text.
+  payload?: CoreReplyPayload;
+  finalText: string;
+  resolveCandidateText: () => Promise<string | undefined>;
+}): Promise<string> {
+  if (
+    (params.payload && getReplyPayloadMetadata(params.payload)?.precedingInputAnswer) ||
+    !isPotentialTruncatedFinal(params.finalText)
+  ) {
+    return params.finalText;
+  }
+  const candidateText = await params.resolveCandidateText();
+  return (
+    selectLongerFinalText({
+      finalText: params.finalText,
+      candidateTexts: [candidateText],
+    }) ?? params.finalText
+  );
+}
+
+/** Named ingress error factory shared by channel payload and admission failures. */
+type ChannelIngressErrorClass<TError extends Error, TArgs extends unknown[]> = {
+  new (...args: TArgs): TError;
+  readonly name: string;
+  readonly prototype: TError;
+};
+
+export function createChannelIngressError(
+  name: string,
+): ChannelIngressErrorClass<Error, [message: string, options?: ErrorOptions]>;
+export function createChannelIngressError<TReason extends string>(
+  name: string,
+  options: { withReason: true },
+): ChannelIngressErrorClass<
+  Error & { readonly reason: TReason },
+  [reason: TReason, message: string, errorOptions?: ErrorOptions]
+>;
+export function createChannelIngressError(
+  name: string,
+  options?: { withReason?: boolean },
+): unknown {
+  const IngressError = class extends Error {
+    declare readonly reason?: string;
+
+    constructor(first: string, second?: string | ErrorOptions, third?: ErrorOptions) {
+      const reasoned = options?.withReason === true;
+      const message = reasoned && typeof second === "string" ? second : first;
+      const errorOptions = reasoned ? third : typeof second === "string" ? undefined : second;
+      super(message, errorOptions);
+      this.name = name;
+      if (reasoned) {
+        this.reason = first;
+      }
+    }
+  };
+  Object.defineProperty(IngressError, "name", { configurable: true, value: name });
+  return IngressError;
+}
+
+const DEFAULT_DRAFT_STREAM_MIN = 200;
+const DEFAULT_DRAFT_STREAM_MAX = 800;
+
+export type ChannelDraftStreamingChunking = {
+  minChars: number;
+  maxChars: number;
+  breakPreference: "paragraph" | "newline" | "sentence";
+};
+
+type ChannelDraftStreamingConfig = StreamingCompatEntry & {
+  accounts?: Record<string, StreamingCompatEntry | undefined>;
+};
+
+export function resolveChannelDraftStreamingChunking(
+  cfg: OpenClawConfig | undefined,
+  channelId: ChannelId,
+  accountId: string | null | undefined,
+  opts: { fallbackLimit: number },
+): ChannelDraftStreamingChunking {
+  const textLimit = resolveTextChunkLimit(cfg, channelId, accountId, {
+    fallbackLimit: opts.fallbackLimit,
+  });
+  const normalizedAccountId = normalizeAccountId(accountId);
+  const channelCfg = cfg?.channels?.[channelId] as ChannelDraftStreamingConfig | undefined;
+  const accountCfg = resolveChannelAccountEntry(
+    channelCfg?.accounts,
+    normalizedAccountId,
+    channelId,
+  );
+  const draftCfg =
+    resolveChannelStreamingPreviewChunk(accountCfg) ??
+    resolveChannelStreamingPreviewChunk(channelCfg);
+
+  const maxRequested = Math.max(1, Math.floor(draftCfg?.maxChars ?? DEFAULT_DRAFT_STREAM_MAX));
+  const maxChars = Math.max(1, Math.min(maxRequested, textLimit));
+  const minRequested = Math.max(1, Math.floor(draftCfg?.minChars ?? DEFAULT_DRAFT_STREAM_MIN));
+  const minChars = Math.min(minRequested, maxChars);
+  const breakPreference =
+    draftCfg?.breakPreference === "newline" || draftCfg?.breakPreference === "sentence"
+      ? draftCfg.breakPreference
+      : "paragraph";
+  return { minChars, maxChars, breakPreference };
+}
+
+export type StallWatchdogTimeoutMeta = {
+  idleMs: number;
+  timeoutMs: number;
+};
+
+/** Public control surface for a transport stall watchdog instance. */
+export type ArmableStallWatchdog = ReturnType<typeof createArmableStallWatchdog>;
+
+/** Creates a watchdog that reports once when an armed transport goes idle. */
+export function createArmableStallWatchdog(params: {
+  label: string;
+  timeoutMs: number;
+  checkIntervalMs?: number;
+  abortSignal?: AbortSignal;
+  runtime?: RuntimeEnv;
+  onTimeout: (meta: StallWatchdogTimeoutMeta) => void;
+}) {
+  const timeoutMs = resolveTimerTimeoutMs(params.timeoutMs, 1);
+  const defaultCheckIntervalMs = Math.min(5_000, Math.max(250, timeoutMs / 6));
+  const checkIntervalMs = resolveTimerTimeoutMs(
+    params.checkIntervalMs,
+    defaultCheckIntervalMs,
+    100,
+  );
+
+  let armed = false;
+  let stopped = false;
+  let lastActivityAt = Date.now();
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const report = (message: string) => {
+    try {
+      params.runtime?.error?.(message);
+    } catch {
+      // Synchronous reporter failures must not escape this timer boundary.
+    }
+  };
+  const reportTimeoutFailure = (error: unknown) =>
+    report(`[${params.label}] transport watchdog timeout handler failed: ${String(error)}`);
+
+  const clearTimer = () => {
+    clearInterval(timer ?? undefined);
+    timer = null;
+  };
+
+  const disarm = () => {
+    armed = false;
+  };
+
+  const stop = () => {
+    stopped = true;
+    disarm();
+    clearTimer();
+    params.abortSignal?.removeEventListener("abort", stop);
+  };
+
+  const arm = (atMs?: number) => {
+    if (stopped) {
+      return;
+    }
+    lastActivityAt = atMs ?? Date.now();
+    armed = true;
+  };
+
+  const touch = (atMs?: number) => {
+    if (stopped) {
+      return;
+    }
+    lastActivityAt = atMs ?? Date.now();
+  };
+
+  const check = () => {
+    if (!armed || stopped) {
+      return;
+    }
+    const now = Date.now();
+    const idleMs = now - lastActivityAt;
+    if (idleMs < timeoutMs) {
+      return;
+    }
+    // Disarm before invoking onTimeout so retries or teardown cannot fire a
+    // second timeout from the same idle interval.
+    disarm();
+    report(
+      `[${params.label}] transport watchdog timeout: idle ${Math.round(idleMs / 1000)}s (limit ${Math.round(timeoutMs / 1000)}s)`,
+    );
+    try {
+      void Promise.resolve(params.onTimeout({ idleMs, timeoutMs })).catch(reportTimeoutFailure);
+    } catch (error) {
+      reportTimeoutFailure(error);
+    }
+  };
+
+  if (params.abortSignal?.aborted) {
+    stop();
+  } else {
+    params.abortSignal?.addEventListener("abort", stop, { once: true });
+    timer = setInterval(check, checkIntervalMs);
+    timer.unref?.();
+  }
+
+  return {
+    arm,
+    touch,
+    disarm,
+    stop,
+    isArmed: () => armed,
+  };
+}
+
+type ContractProofs<TKey extends string> = Partial<Record<TKey, () => Promise<void> | void>>;
+type ProofStatus = "verified" | "not_declared";
+type CapabilityProofResult<TKey extends string> = { capability: TKey; status: ProofStatus };
+
+async function verifyContractProofs<TKey extends string, TResult>(params: {
+  keys: readonly TKey[];
+  isDeclared: (key: TKey) => boolean;
+  proofs: ContractProofs<TKey>;
+  missingProofError: (key: TKey) => string;
+  result: (key: TKey, status: ProofStatus) => TResult;
+}): Promise<TResult[]> {
+  const results: TResult[] = [];
+  for (const key of params.keys) {
+    if (!params.isDeclared(key)) {
+      results.push(params.result(key, "not_declared"));
+      continue;
+    }
+    const proof = params.proofs[key];
+    if (!proof) {
+      throw new Error(params.missingProofError(key));
+    }
+    await proof();
+    results.push(params.result(key, "verified"));
+  }
+  return results;
+}
+
+export async function verifyDurableFinalCapabilityProofs(params: {
+  adapterName: string;
+  capabilities?: DurableFinalDeliveryRequirementMap;
+  proofs: ContractProofs<DurableFinalDeliveryCapability>;
+}): Promise<CapabilityProofResult<DurableFinalDeliveryCapability>[]> {
+  return await verifyContractProofs({
+    keys: durableFinalDeliveryCapabilities,
+    isDeclared: (capability) => params.capabilities?.[capability] === true,
+    proofs: params.proofs,
+    missingProofError: (capability) =>
+      `${params.adapterName} declares durable final capability "${capability}" without a contract proof`,
+    result: (capability, status) => ({ capability, status }),
+  });
+}
+
+export async function verifyChannelMessageAdapterCapabilityProofs(params: {
+  adapterName: string;
+  adapter: Pick<ChannelMessageAdapterShape, "durableFinal">;
+  proofs: ContractProofs<DurableFinalDeliveryCapability>;
+}): Promise<CapabilityProofResult<DurableFinalDeliveryCapability>[]> {
+  return await verifyDurableFinalCapabilityProofs({
+    adapterName: params.adapterName,
+    capabilities: params.adapter.durableFinal?.capabilities,
+    proofs: params.proofs,
+  });
+}
+
+export async function verifyChannelMessageReceiveAckPolicyAdapterProofs(params: {
+  adapterName: string;
+  adapter: Pick<ChannelMessageAdapterShape, "receive">;
+  proofs: ContractProofs<ChannelMessageReceiveAckPolicy>;
+}): Promise<{ policy: ChannelMessageReceiveAckPolicy; status: ProofStatus }[]> {
+  const { adapterName } = params;
+  const receive = params.adapter.receive;
+  const declared = new Set(
+    receive?.supportedAckPolicies?.length
+      ? receive.supportedAckPolicies
+      : receive?.defaultAckPolicy
+        ? [receive.defaultAckPolicy]
+        : [],
+  );
+  return await verifyContractProofs({
+    keys: channelMessageReceiveAckPolicies,
+    isDeclared: (policy) => declared.has(policy),
+    proofs: params.proofs,
+    missingProofError: (policy) =>
+      `${adapterName} declares receive ack policy "${policy}" without a contract proof`,
+    result: (policy, status) => ({ policy, status }),
+  });
+}
+
+export async function verifyChannelMessageLiveFinalizerProofs(params: {
+  adapterName: string;
+  adapter: Pick<ChannelMessageAdapterShape, "live">;
+  proofs: ContractProofs<LivePreviewFinalizerCapability>;
+}): Promise<CapabilityProofResult<LivePreviewFinalizerCapability>[]> {
+  const { adapterName } = params;
+  const capabilities = params.adapter.live?.finalizer?.capabilities;
+  return await verifyContractProofs({
+    keys: livePreviewFinalizerCapabilities,
+    isDeclared: (capability) => capabilities?.[capability] === true,
+    proofs: params.proofs,
+    missingProofError: (capability) =>
+      `${adapterName} declares live preview finalizer capability "${capability}" without a contract proof`,
+    result: (capability, status) => ({ capability, status }),
+  });
+}
+
+export async function verifyChannelMessageLiveCapabilityAdapterProofs(params: {
+  adapterName: string;
+  adapter: Pick<ChannelMessageAdapterShape, "live">;
+  proofs: ContractProofs<ChannelMessageLiveCapability>;
+}): Promise<CapabilityProofResult<ChannelMessageLiveCapability>[]> {
+  const { adapterName } = params;
+  const capabilities = params.adapter.live?.capabilities;
+  return await verifyContractProofs({
+    keys: channelMessageLiveCapabilities,
+    isDeclared: (capability) => capabilities?.[capability] === true,
+    proofs: params.proofs,
+    missingProofError: (capability) =>
+      `${adapterName} declares live capability "${capability}" without a contract proof`,
+    result: (capability, status) => ({ capability, status }),
+  });
+}
+
+export type MessageAckPolicy = ChannelMessageReceiveAckPolicy;
+
+type MessageAckStage = "receive_record" | "agent_dispatch" | "durable_send" | "manual";
+
+type MessageAckState = "pending" | "acked" | "nacked";
+
+/** Mutable receive context passed through durable inbound message processing. */
+export type MessageReceiveContext<TMessage = unknown> = {
+  id: string;
+  channel: string;
+  accountId?: string;
+  message: TMessage;
+  ackPolicy: MessageAckPolicy;
+  ackState: MessageAckState;
+  ackedAt?: number;
+  nackErrorMessage?: string;
+  receivedAt: number;
+  signal: AbortSignal;
+  shouldAckAfter(stage: MessageAckStage): boolean;
+  ack(): Promise<void>;
+  nack(error: unknown): Promise<void>;
+};
+
+const neverAbortedSignal = new AbortController().signal;
+
+const ackStages: Record<MessageAckPolicy, MessageAckStage | undefined> = {
+  after_receive_record: "receive_record",
+  after_agent_dispatch: "agent_dispatch",
+  after_durable_send: "durable_send",
+  manual: undefined,
+};
+
+/** Creates a receive context with idempotent ack and explicit nack state transitions. */
+export function createMessageReceiveContext<TMessage>(params: {
+  id: string;
+  channel: string;
+  accountId?: string;
+  message: TMessage;
+  ackPolicy?: MessageAckPolicy;
+  receivedAt?: number;
+  signal?: AbortSignal;
+  onAck?: () => Promise<void> | void;
+  onNack?: (error: unknown) => Promise<void> | void;
+}): MessageReceiveContext<TMessage> {
+  let nackInFlight: Promise<void> | undefined;
+  const ctx: MessageReceiveContext<TMessage> = {
+    id: params.id,
+    channel: params.channel,
+    ...(params.accountId ? { accountId: params.accountId } : {}),
+    message: params.message,
+    ackPolicy: params.ackPolicy ?? "after_receive_record",
+    ackState: "pending",
+    receivedAt: params.receivedAt ?? Date.now(),
+    signal: params.signal ?? neverAbortedSignal,
+    shouldAckAfter: (stage) => ackStages[ctx.ackPolicy] === stage,
+    ack: async () => {
+      // Ack callbacks must be idempotent because receive pipelines may revisit completed stages.
+      if (ctx.ackState === "acked") {
+        return;
+      }
+      await params.onAck?.();
+      ctx.ackState = "acked";
+      ctx.ackedAt = Date.now();
+      delete ctx.nackErrorMessage;
+    },
+    nack: async (error) => {
+      // Share overlapping callbacks; clear rejected work so a later call can retry.
+      if (ctx.ackState === "nacked") {
+        return;
+      }
+      if (nackInFlight) {
+        await nackInFlight;
+        return;
+      }
+      nackInFlight = (async () => {
+        await params.onNack?.(error);
+        ctx.ackState = "nacked";
+        ctx.nackErrorMessage = formatErrorMessage(error);
+      })();
+      try {
+        await nackInFlight;
+      } finally {
+        nackInFlight = undefined;
+      }
+    },
+  };
+  return ctx;
+}
 
 export { isCompleteAgentPreamble } from "../agents/agent-activity-presentation.js";
 
@@ -41,7 +527,6 @@ export {
   CHANNEL_INGRESS_RETENTION_DEFAULTS,
   createChannelIngressMonitor,
 } from "../channels/message/ingress-monitor.js";
-export { createChannelIngressError } from "../channels/message/ingress-errors.js";
 export {
   DEFAULT_INGRESS_RETRY_DEAD_LETTER_MIN_AGE_MS,
   DEFAULT_INGRESS_RETRY_MAX_ATTEMPTS,
@@ -81,14 +566,7 @@ export {
 
 export { createDraftStreamLoop, type DraftStreamLoop } from "../channels/draft-stream-loop.js";
 export { createRunStateMachine } from "../channels/run-state-machine.js";
-export {
-  createArmableStallWatchdog,
-  type ArmableStallWatchdog,
-  type StallWatchdogTimeoutMeta,
-} from "../channels/transport/stall-watchdog.js";
 
-export { resolveChannelDraftStreamingChunking } from "../channels/draft-streaming-chunking.js";
-export type { ChannelDraftStreamingChunking } from "../channels/draft-streaming-chunking.js";
 export { createRuntimeOutboundDelegates } from "../channels/plugins/runtime-forwarders.js";
 export {
   createAccountStatusSink,
@@ -202,13 +680,6 @@ export { defineChannelMessageAdapter } from "../channels/message/adapter.js";
 export { createChannelMessageAdapterFromOutbound } from "../channels/message/outbound-bridge.js";
 export { createDurableInboundReceiveJournalFromQueue } from "../channels/message/durable-receive.js";
 export {
-  verifyChannelMessageAdapterCapabilityProofs,
-  verifyChannelMessageLiveCapabilityAdapterProofs,
-  verifyChannelMessageLiveFinalizerProofs,
-  verifyChannelMessageReceiveAckPolicyAdapterProofs,
-  verifyDurableFinalCapabilityProofs,
-} from "../channels/message/contracts.js";
-export {
   createLivePreviewLifecycle,
   createPreviewMessageReceipt,
   defineFinalizableLivePreviewAdapter,
@@ -221,7 +692,6 @@ export {
   listMessageReceiptPlatformIds,
   resolveMessageReceiptPrimaryId,
 } from "../channels/message/receipt.js";
-export { createMessageReceiveContext } from "../channels/message/receive.js";
 export type { ChannelIngressDrain } from "../channels/message/ingress-drain.js";
 export type {
   ChannelIngressMonitorDeliveryResult,
@@ -234,7 +704,6 @@ export type {
   ChannelIngressQueueCorruptClaim,
   ChannelIngressQueueRecord,
 } from "../channels/message/ingress-queue.js";
-export type { MessageAckPolicy, MessageReceiveContext } from "../channels/message/receive.js";
 export type {
   ChannelMessageAdapterShape,
   ChannelMessageDurableFinalAdapter,
@@ -300,9 +769,3 @@ export async function withDurableMessageSendContext<T>(
   const mod = await loadChannelMessageRuntimeModule();
   return await mod.withDurableMessageSendContextCore(params, run);
 }
-
-export {
-  isPotentialTruncatedFinal,
-  resolveTranscriptBackedChannelFinalText,
-  selectLongerFinalText,
-} from "../channels/streaming-final-text.js";

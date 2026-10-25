@@ -1,6 +1,6 @@
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createArmableStallWatchdog } from "./stall-watchdog.js";
+import { createArmableStallWatchdog } from "../../plugin-sdk/channel-outbound.js";
 
 let onTimeout = vi.fn();
 let watchdog: ReturnType<typeof createArmableStallWatchdog>;

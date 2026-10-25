@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { createMessageReceiveContext } from "../../plugin-sdk/channel-outbound.js";
 import {
   createLiveMessageState,
   defineFinalizableLivePreviewAdapter,
   deliverWithFinalizableLivePreviewAdapter,
   markLiveMessagePreviewUpdated,
 } from "./live.js";
-import { createMessageReceiveContext } from "./receive.js";
 
 type MediaPayload = { text?: string; mediaUrl: string };
 type PreviewAdapter<TPayload, TEdit> = Parameters<
