@@ -45,6 +45,7 @@ const { values } = parseArgs({
     "reconnect-waves": { type: "boolean", default: false },
     "cold-row-reads": { type: "boolean", default: false },
     "startup-admission": { type: "boolean", default: false },
+    "from-listening": { type: "boolean", default: false },
     "request-start-owner": { type: "string" },
     "row-refresh-owner": { type: "string" },
     "trace-gc": { type: "boolean", default: false },
@@ -78,6 +79,9 @@ const coldRowReads = values["cold-row-reads"];
 const startupAdmission = values["startup-admission"];
 if (startupAdmission && !coldRowReads) {
   throw new Error("--startup-admission requires --cold-row-reads");
+}
+if (values["from-listening"] && !startupAdmission) {
+  throw new Error("--from-listening requires --startup-admission");
 }
 if (values["request-start-owner"] && !startupAdmission) {
   throw new Error("--request-start-owner requires --startup-admission");
@@ -321,7 +325,7 @@ if (isMainThread) {
   };
   if (${startupAdmission}) {
     const { channel } = await import('node:diagnostics_channel');
-    const methods = new Set(['models.list', 'sessions.subscribe', 'sessions.list', 'board.get', 'sessions.resolve', 'sessions.messages.subscribe', 'chat.startup']);
+    const methods = new Set(['models.list', 'sessions.subscribe', 'sessions.list', 'board.get', 'sessions.describe', 'sessions.resolve', 'sessions.messages.subscribe', 'chat.startup']);
     channel('openclaw.gateway.rpc').subscribe((event) => {
       if (!rowCounts.active || !methods.has(event.method)) return;
       if (event.phase === 'dispatch') recordAdmissionSample(event.method + ':queue_wait', event.queueWaitMs);
@@ -1094,6 +1098,9 @@ async function ready(child: ChildProcess) {
   while (performance.now() < deadline) {
     assertAlive();
     if (listeners.has(child)) {
+      if (recovering && values["from-listening"]) {
+        return;
+      }
       try {
         const response = await fetch(`http://127.0.0.1:${port}/readyz`, {
           signal: AbortSignal.timeout(2000),
@@ -2003,6 +2010,11 @@ async function measureColdRowReads(
     ...(startupAdmission
       ? [
           {
+            name: "sessions.describe",
+            method: "sessions.describe",
+            params: { key: clientSessionKey },
+          },
+          {
             name: "sessions.resolve",
             method: "sessions.resolve",
             params: { key: clientSessionKey },
@@ -2028,9 +2040,18 @@ async function measureColdRowReads(
   const readShapes = clientReadShapes[0]!;
   const deadline = loadStartedAt + durationMs;
   console.log(`PHASE cold-row-ready ${readyMs.toFixed(1)}ms`);
+  const connections: ConnectAttempt[] = [];
   const observations = await Promise.allSettled(
     Array.from({ length: clientCount }, async (_, index) => {
-      const client = await connect(index);
+      const attempt: ConnectAttempt = {
+        client: index,
+        wave: 0,
+        startedAtMs: performance.now(),
+        startedMs: performance.now() - restartAt,
+        elapsedMs: 0,
+      };
+      connections.push(attempt);
+      const client = await connect(index, { attempt });
       const clientSessionKey = clientSessionKeys[index]!;
       connectedClients.add(index);
       for (
@@ -2055,6 +2076,14 @@ async function measureColdRowReads(
               } else if (method === "models.list") {
                 if (!isRecord(response) || !Array.isArray(response.models)) {
                   throw new Error("Model catalog did not return its models array");
+                }
+              } else if (method === "sessions.describe") {
+                if (
+                  !isRecord(response) ||
+                  !isRecord(response.session) ||
+                  response.session.key !== clientSessionKey
+                ) {
+                  throw new Error("Session description did not return the seeded session");
                 }
               } else if (method === "sessions.resolve") {
                 if (
@@ -2158,6 +2187,8 @@ async function measureColdRowReads(
     output,
     fixture,
     scenario: startupAdmission ? "startup-admission" : "cold-row-reads",
+    reconnectBoundary: values["from-listening"] ? "listening" : "ready",
+    connections,
     clientCount,
     ...(startupAdmission
       ? {

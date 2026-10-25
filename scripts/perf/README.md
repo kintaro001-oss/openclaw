@@ -881,7 +881,7 @@ Add `--startup-admission --waves 20` to the cold-row command to attribute the
 operator request-start backlog. This uses a fixed 20 batches per client instead
 of `--seconds`. Each batch sends a scoped `models.list` before an event-only
 `sessions.subscribe`, immediately followed on the same socket by the
-sidebar, roster, Board, `sessions.resolve`, `sessions.messages.subscribe`, and
+sidebar, roster, Board, `sessions.describe`, `sessions.resolve`, `sessions.messages.subscribe`, and
 keyed `chat.startup` requests. Batches await all replies and retain the
 `--poll-ms` pacing. There are no artificial handler delays or held preparations.
 Each client uses a distinct shared, unarchived fixture session for catalog,
@@ -908,6 +908,16 @@ measures reconnect contention, not interrupted agent-turn recovery or large
 transcript hydration. Keep identical instrumentation for A/A and A/B runs, use
 the campaign's untraced cost gates, and collect promotion separately with
 `--trace-gc` and its own controls.
+
+Add `--from-listening` to start the reconnect cohort as soon as the restarted
+Gateway logs its listening boundary, before `/readyz` succeeds. This captures
+the upgrade and hello wait that a readiness-gated cohort misses. The result
+records `reconnectBoundary` and per-client upgrade, challenge, hello, and total
+connection timings alongside the RPC phase samples. First-batch completion time
+relative to `readyMs` includes those connection waits; in this mode `readyMs`
+names the observed listening boundary rather than readiness. Use at least 30
+clients for a restart reload wave. This is a clean restart with settled runs;
+interrupted-run recovery still requires the separate restart workload.
 Use `--request-start-owner /path/to/request-start.ts` to compare scheduler
 revisions in the same installation. The source loader verifies the selected
 file's SHA-256 at load time and records it in the result.
