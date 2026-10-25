@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import {
-  positiveSecondsToSafeMilliseconds,
+  positiveSecondsToSafeMilliseconds as resolveOAuthTokenLifetimeMs,
   resolveExpiresAtMsFromDurationMs,
   resolveTimerTimeoutMs,
 } from "../../packages/normalization-core/src/number-coercion.js";
@@ -181,13 +181,11 @@ export function parseOAuthAuthorizationInput(
   return { code: value };
 }
 
-/** Converts provider `expires_in` seconds into safe positive milliseconds. */
-export function resolveOAuthTokenLifetimeMs(
-  /** Provider `expires_in` value in seconds. */
-  value: unknown,
-): number | undefined {
-  return positiveSecondsToSafeMilliseconds(value);
-}
+/**
+ * Converts provider `expires_in` seconds into safe positive milliseconds.
+ * @param value Provider `expires_in` value in seconds.
+ */
+export { resolveOAuthTokenLifetimeMs };
 
 /** Resolves provider token lifetime into an absolute expiry timestamp with optional refresh skew. */
 export function resolveOAuthTokenExpiresAt(
