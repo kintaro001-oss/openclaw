@@ -6,15 +6,6 @@ import { sha256Hex } from "./transport-utils.js";
 
 export type ResponsesInputReplay = { afterResponseId: string; before: string[]; after: string[] };
 
-export function recordResponsesInputReplay(
-  message: AssistantMessage,
-  replay?: ResponsesInputReplay,
-) {
-  if (replay) {
-    Object.assign(message, { openclawResponsesInputReplay: replay });
-  }
-}
-
 export function readResponsesInputReplayState(message: AssistantMessage) {
   const replay =
     "openclawResponsesInputReplay" in message ? message.openclawResponsesInputReplay : undefined;

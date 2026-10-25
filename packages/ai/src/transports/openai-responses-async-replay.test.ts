@@ -4,10 +4,7 @@ import { expect, it } from "vitest";
 import { makeTextToolResult } from "../../../../test/helpers/text-tool-result.js";
 import { transformProviderMessages } from "../provider-transcript-transform.js";
 import { resolveResponsesContinuationRequest } from "./openai-responses-continuation.js";
-import {
-  responsesInputFingerprint,
-  recordResponsesInputReplay,
-} from "./openai-responses-input-replay.js";
+import { responsesInputFingerprint } from "./openai-responses-input-replay.js";
 import { createAssistant, createModel } from "./openai-responses-prompt-observer.test-support.js";
 import {
   convertProviderResponsesMessages,
@@ -285,11 +282,13 @@ it.each(["before", "after"] as const)(
     const result = makeTextToolResult("call_1|fc_1", "lookup", "found", false, 2);
     const input = { type: "function_call_output", call_id: "call_1", output: "found" };
     const response = answer("steered answer", "resp_steered", "msg_2");
-    recordResponsesInputReplay(response, {
-      afterResponseId: "resp_parent",
-      before: [],
-      after: [],
-      [position]: [responsesInputFingerprint(input)],
+    Object.assign(response, {
+      openclawResponsesInputReplay: {
+        afterResponseId: "resp_parent",
+        before: [],
+        after: [],
+        [position]: [responsesInputFingerprint(input)],
+      },
     });
     const serialized = JSON.stringify({
       messages: [user("original", 0), call, result, user("update", 3), response],

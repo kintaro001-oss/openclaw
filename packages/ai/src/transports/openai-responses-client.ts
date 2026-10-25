@@ -45,7 +45,6 @@ import {
   summarizeResponsesPayload,
 } from "./openai-responses-debug.js";
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
-import { recordResponsesInputReplay } from "./openai-responses-input-replay.js";
 import {
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
@@ -476,7 +475,10 @@ function createResponsesTransportExecutor(config: {
             finishWebSocket = websocket.finish;
             requestedTier = websocket.request.service_tier;
             websocketBaseline = websocket.fullRequest;
-            recordResponsesInputReplay(output, websocket.inputReplay);
+            const inputReplay = websocket.inputReplay;
+            if (inputReplay) {
+              Object.assign(output, { openclawResponsesInputReplay: inputReplay });
+            }
             contextUsageEligible &&= websocket.inputReplay === undefined;
             observePrompt?.(websocket.request, {
               egress: "responses-websocket",
