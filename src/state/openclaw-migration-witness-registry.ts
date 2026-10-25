@@ -1,4 +1,4 @@
-import type { OpenClawMigrationWitness } from "./openclaw-migration-witness.js";
+import type { OpenClawMigrationWitness } from "./openclaw-migration-witness.schema.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-schema-versions.js";
 
 /** Unrefreshed aliases retain the exact registry observations from the original backup. */

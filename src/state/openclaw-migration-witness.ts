@@ -1,7 +1,7 @@
 import { createHash, type Hash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { sql } from "kysely";
-import { z } from "zod";
+import type { z } from "zod";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -28,44 +28,17 @@ import { AGENT_JSON_PREDICATE_COLUMNS } from "./openclaw-agent-json-predicate-sc
 import { LEGACY_MEMORY_REVISION_TRIGGER_NAMES } from "./openclaw-agent-memory-revision-migration.js";
 import { withoutOutboxEnqueueSequence } from "./openclaw-agent-outbox-sequence-migration.js";
 import { assertMigrationWitnessRegistryPreserved } from "./openclaw-migration-witness-registry.js";
+import {
+  type OpenClawMigrationWitness,
+  registryRowSchema,
+  witnessIdentifierSchema as identifier,
+  witnessSchema,
+} from "./openclaw-migration-witness.schema.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import { assertCurrentStateRuntimeSchema } from "./openclaw-state-db-fast-path.js";
 import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
 import { resolveOpenClawRegisteredAgentDatabasePath } from "./openclaw-state-db.paths.js";
 
-const identifier = z.string().max(256);
-const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const headerInteger = z.number().int().min(-2147483648).max(2147483647);
-const digest = z.string().regex(/^[a-f0-9]{64}$/u);
-const registryRowSchema = z
-  .object({ store: digest, locator: digest, schemaVersion: headerInteger, sha256: digest })
-  .strict();
-const tableSchema = z
-  .object({
-    name: identifier,
-    columns: z.array(identifier).min(1).max(256),
-    rowCount: count,
-    sha256: digest,
-    migrationSha256: digest,
-    registryRows: z.array(registryRowSchema).max(4096).optional(),
-  })
-  .strict();
-const witnessSchema = z
-  .object({
-    version: z.literal(1),
-    role: z.enum(["agent", "global", "sqlite"]),
-    schemaVersion: headerInteger,
-    applicationId: headerInteger,
-    agentId: identifier.min(1).nullable(),
-    schemaSha256: digest,
-    migrationSchemaSha256: digest,
-    registryMigrationBinding: digest.nullable(),
-    tables: z.array(tableSchema).max(512),
-    gaps: z.object({ missingWindows: count, emptyWindows: count }).strict(),
-  })
-  .strict();
-
-export type OpenClawMigrationWitness = z.infer<typeof witnessSchema>;
 type OpenClawMigrationWitnessOwner = { role: "agent"; agentId: string } | { role: "global" };
 
 const derivedMigrationColumns = new Map<string, ReadonlySet<string>>(
