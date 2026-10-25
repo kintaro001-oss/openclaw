@@ -371,7 +371,12 @@ try {
               }
               await page.goto(new URL("/chat", slot.url).href);
               await waitForTalkReady(page);
-              await page.getByRole("button", { name: "Start voice input", exact: true }).click();
+              await page
+                .getByRole("button", {
+                  name: viewport.name === "mobile" ? "Tap to talk" : "Start voice input",
+                  exact: true,
+                })
+                .click();
               await gateway.waitForRequest("talk.client.create");
               await page.waitForFunction(() =>
                 Boolean(window.openclawTalkBench.peer?.remoteDescription),
