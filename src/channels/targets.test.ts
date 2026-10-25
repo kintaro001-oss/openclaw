@@ -1,6 +1,10 @@
 // Channel target tests cover target parsing, formatting, and selection helpers.
 import { describe, expect, it } from "vitest";
-import { buildMessagingTarget, ensureTargetId, requireTargetKind } from "./targets.js";
+import {
+  buildMessagingTarget,
+  ensureTargetId,
+  requireTargetKind,
+} from "../plugin-sdk/channel-targets.js";
 
 describe("channel targets", () => {
   it("ensureTargetId returns the candidate when it matches", () => {
