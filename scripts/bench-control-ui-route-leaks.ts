@@ -18,6 +18,10 @@ import {
   pathForRoute,
   type RouteId,
 } from "../ui/src/app-route-paths.ts";
+import {
+  createRfbRawFrame,
+  installScriptedRfbServer,
+} from "../ui/src/e2e/desktop-rfb-test-support.ts";
 import { CONFIG_PAGE_IDS } from "../ui/src/pages/config/config-sections.ts";
 import { createControlUiE2eArtifactDir } from "../ui/src/test-helpers/control-ui-e2e-artifacts.ts";
 import type { MockGatewayWindow } from "../ui/src/test-helpers/control-ui-e2e-contract.ts";
@@ -33,6 +37,8 @@ import { parityBaseScenario, parityWorkboardScenario } from "./control-ui-parity
 import { startControlUiBenchGatewayServer } from "./lib/control-ui-bench-gateway-server.ts";
 import { summarizeScriptCoverage } from "./lib/control-ui-cold-load-trace.ts";
 import { createInteractionFixture } from "./lib/control-ui-interaction-scenarios.ts";
+
+type ProbeRoute = RouteId | "sharing" | "desktop-document";
 
 const { values } = parseArgs({
   options: {
@@ -50,7 +56,7 @@ const { values } = parseArgs({
 });
 if (values.help) {
   console.log(
-    "--bundle-dir BASE [--compare-bundle-dir HEAD] --routes sessions,cron,usage --mode coverage|timing|all --pairs 10 --profiles local,remote [--screenshots] [--output DIR]. Default routes include every Settings section, Sessions, Cron, Agents, Usage, Plugins, Workboard and sharing. Optional --interactions agents-files,cron-history,cron-transcript probes follow cold readiness. Coverage and timing run in separate fresh contexts; comparison timings include a base/base control.",
+    "--bundle-dir BASE [--compare-bundle-dir HEAD] --routes sessions,cron,usage --mode coverage|timing|all --pairs 10 --profiles local,remote [--screenshots] [--output DIR]. Default routes include every Settings section, Sessions, Cron, Agents, Usage, Plugins, Workboard and sharing. Select --routes systems,portals,desktop-document for the optional Desktop probes; they use a scripted RFB endpoint and loaded synthetic portal. Optional --interactions agents-files,cron-history,cron-transcript probes follow cold readiness. Coverage and timing run in separate fresh contexts; comparison timings include a base/base control.",
   );
   process.exit(0);
 }
@@ -89,10 +95,14 @@ const defaults = [
   ]),
 ];
 const routes = (values.routes?.split(",") ?? defaults).map((id) => {
-  if (id !== "sharing" && !APP_ROUTE_IDS.some((route) => route === id)) {
+  if (
+    id !== "sharing" &&
+    id !== "desktop-document" &&
+    !APP_ROUTE_IDS.some((route) => route === id)
+  ) {
     throw new Error(`Unknown route: ${id}`);
   }
-  return id as RouteId | "sharing";
+  return id as ProbeRoute;
 });
 const interactionIds = values.interactions?.split(",") ?? [];
 const knownInteractions = ["agents-files", "cron-history", "cron-transcript"];
@@ -105,10 +115,13 @@ const output = createControlUiE2eArtifactDir("route-leaks", values.output);
 const configPages = new Set<string>(CONFIG_PAGE_IDS);
 const fields =
   ':is(input:not(:disabled),textarea:not(:disabled),select:not(:disabled),button[role="combobox"]:not(:disabled),[role="switch"]:not([aria-disabled="true"]))';
-function routeTarget(id: RouteId | "sharing", sessionKey: string) {
+function routeTarget(id: ProbeRoute, sessionKey: string) {
   const route =
     id === "sharing" || id === "settings" ? "chat" : id === "config" ? "appearance" : id;
-  const selectors: Partial<Record<RouteId | "sharing", string>> = {
+  const selectors: Partial<Record<ProbeRoute, string>> = {
+    systems: ".systems-desktop .desktop-surface canvas",
+    portals: "openclaw-portals-page .portals-preview__frame",
+    "desktop-document": ".desktop-document .desktop-surface canvas",
     channels: "openclaw-channels-page .channels-item, openclaw-channels-page .channels-empty",
     connection: "openclaw-connection-page .settings-input-with-hint input:not(:disabled)",
     profile:
@@ -155,12 +168,29 @@ function routeTarget(id: RouteId | "sharing", sessionKey: string) {
   return {
     route,
     pathname:
-      id === "sharing"
-        ? controlUiSessionPath(sessionKey)
-        : id === "agents"
-          ? pathForAgentPanel("main")
-          : pathForRoute(id),
+      id === "desktop-document"
+        ? `/focus/desktop/session/${encodeURIComponent(sessionKey)}`
+        : id === "sharing"
+          ? controlUiSessionPath(sessionKey)
+          : id === "agents"
+            ? pathForAgentPanel("main")
+            : pathForRoute(id),
     search: id === "model-setup" ? "?firstRun=explicit" : "",
+    ...(id === "desktop-document"
+      ? { requiredMethods: ["sessions.describe", "environments.status", "desktop.observe"] }
+      : id === "systems"
+        ? {
+            requiredMethods: [
+              "environments.list",
+              "node.list",
+              "system.info",
+              "backup.status",
+              "desktop.observe",
+            ],
+          }
+        : id === "portals"
+          ? { requiredMethods: ["portal.list"] }
+          : {}),
     selector:
       selectors[id] ??
       selectors[route] ??
@@ -168,7 +198,7 @@ function routeTarget(id: RouteId | "sharing", sessionKey: string) {
   };
 }
 
-function fixtureFor(build: { buildId: string; version: string }, id: RouteId | "sharing") {
+function fixtureFor(build: { buildId: string; version: string }, id: ProbeRoute, baseUrl: string) {
   const fixture = createInteractionFixture(build.buildId, build.version);
   const workboard = id === "workboard" ? parityWorkboardScenario : {};
   return {
@@ -176,6 +206,9 @@ function fixtureFor(build: { buildId: string; version: string }, id: RouteId | "
     ...workboard,
     serverBuildId: build.buildId,
     serverVersion: build.version,
+    ...(id === "systems" || id === "desktop-document"
+      ? { deferredMethods: ["desktop.observe"] }
+      : {}),
     ...(id === "profile" || id === "sharing"
       ? { presenceUsers: parityBaseScenario.presenceUsers }
       : {}),
@@ -199,6 +232,17 @@ function fixtureFor(build: { buildId: string; version: string }, id: RouteId | "
         ...(id === "sharing" ? ["session.visibility.set", "session.members.listEvidence"] : []),
         ...(id === "profile" || id === "sharing" ? ["users.self", "users.list"] : []),
         ...(id === "secrets" ? ["secrets.store.list"] : []),
+        ...(id === "portals" ? ["portal.list"] : []),
+        ...(id === "systems" || id === "desktop-document"
+          ? [
+              "desktop.observe",
+              "environments.list",
+              "environments.status",
+              "node.list",
+              "system.info",
+              "backup.status",
+            ]
+          : []),
         ...(id === "search" ? ["webSearch.status"] : []),
         ...(id === "model-setup" ? ["openclaw.setup.detect"] : []),
         ...(id === "cron" && interactionIds.length ? ["cron.history"] : []),
@@ -207,6 +251,50 @@ function fixtureFor(build: { buildId: string; version: string }, id: RouteId | "
     methodResponses: {
       ...fixture.methodResponses,
       "config.schema": parityBaseScenario.methodResponses?.["config.schema"],
+      ...(id === "portals"
+        ? {
+            "portal.list": {
+              portals: [
+                {
+                  id: "route-probe",
+                  title: "Route probe portal",
+                  port: 3000,
+                  listenPort: 3000,
+                  tokenQuery: "openclaw_portal=synthetic",
+                  createdAtMs: 1,
+                  publicUrl: `${baseUrl}/route-probe-portal/`,
+                  url: `${baseUrl}/route-probe-portal/?openclaw_portal=synthetic`,
+                },
+              ],
+            },
+          }
+        : {}),
+      ...(id === "systems" || id === "desktop-document"
+        ? {
+            "desktop.observe": {
+              transport: "rfb",
+              wsPath: "/desktop/observe?token=route-probe",
+              expiresAtMs: 60_000,
+              control: false,
+            },
+            "environments.status": {
+              id: "gateway",
+              type: "local",
+              label: "Synthetic Gateway",
+              status: "available",
+              desktop: true,
+            },
+            "node.list": { nodes: [] },
+            "backup.status": { targets: [], schedules: [], locations: [] },
+          }
+        : {}),
+      ...(id === "desktop-document"
+        ? {
+            "sessions.describe": {
+              session: { ...fixture.sessions[0], placement: { state: "local" } },
+            },
+          }
+        : {}),
       ...(id === "profile" || id === "sharing"
         ? {
             "users.self": parityBaseScenario.methodResponses?.["users.self"],
@@ -270,6 +358,23 @@ function fixtureFor(build: { buildId: string; version: string }, id: RouteId | "
           }
         : {}),
       "backup.status": { targets: [], schedules: [], locations: [] },
+      ...(id === "systems"
+        ? {
+            "environments.list": {
+              environments: [
+                {
+                  id: "gateway",
+                  type: "local",
+                  label: "Synthetic Gateway",
+                  status: "available",
+                  desktop: true,
+                },
+              ],
+              profiles: [],
+            },
+            "system.info": parityBaseScenario.methodResponses?.["system.info"],
+          }
+        : {}),
       ...(id === "agents" && interactionIds.includes("agents-files")
         ? {
             "agents.files.list": {
@@ -593,14 +698,19 @@ try {
             try {
               console.info(`[route-leaks] ${prefix}: preparing synthetic fixture`);
               const prepared = await prepareControlUiMockGatewayScenario(
-                fixtureFor(variant.build, route),
+                fixtureFor(variant.build, route, server.baseUrl),
               );
               const fixture = prepared.scenario;
               const bootstrapPayload = JSON.stringify(createControlUiMockBootstrapConfig(fixture));
               server.setFixtureReader((pathname) =>
                 pathname === CONTROL_UI_BOOTSTRAP_CONFIG_PATH
                   ? { body: bootstrapPayload, contentType: "application/json" }
-                  : prepared.assets.get(pathname),
+                  : route === "portals" && pathname === "/route-probe-portal/"
+                    ? {
+                        body: '<!doctype html><title>Route probe portal</title><h1 data-route-probe-portal>Route probe portal</h1><button type="button">Ready</button>',
+                        contentType: "text/html",
+                      }
+                    : prepared.assets.get(pathname),
               );
               const target = routeTarget(route, fixture.sessionKey!);
               result.target = target;
@@ -682,6 +792,27 @@ try {
               await page.goto(`${server.baseUrl}${target.pathname}${target.search}`, {
                 waitUntil: "domcontentloaded",
               });
+              if (route === "systems" || route === "desktop-document") {
+                const rfb = await installScriptedRfbServer(page);
+                await page.waitForFunction(
+                  () =>
+                    ((window as MockGatewayWindow).openclawControlUiE2eGateway?.findRequests(
+                      "desktop.observe",
+                    ).length ?? 0) > 0,
+                );
+                await page.evaluate(() =>
+                  (window as MockGatewayWindow).openclawControlUiE2eGateway?.resolveDeferred(
+                    "desktop.observe",
+                  ),
+                );
+                await page.waitForFunction(
+                  () =>
+                    (window as typeof window & { desktopRfbEvents?: () => string[] })
+                      .desktopRfbEvents?.()
+                      .includes("authenticated:1") === true,
+                );
+                await rfb.send([createRfbRawFrame()]);
+              }
               if (route === "sharing") {
                 await page
                   .locator(".chat-pane-cache__pane--active .agent-chat__composer-combobox textarea")
@@ -689,7 +820,7 @@ try {
                 await page.locator(".chat-pane__sharing-trigger").click();
               }
               await page.waitForFunction(
-                ({ routeId, selector }) => {
+                ({ routeId, selector, requiredMethods }) => {
                   const snapshot = window.openclawControlUi?.snapshot();
                   const approvalsSettled =
                     routeId !== "approvals" ||
@@ -703,12 +834,50 @@ try {
                         .querySelector(".standing-grants-table .data-table-empty-state")
                         ?.textContent?.trim() ===
                         "No standing grants. Answer an automation approval with Always allow to mint one.");
+                  // SAFETY: Every measured page receives this fixture before navigation.
+                  const gateway = (window as MockGatewayWindow).openclawControlUiE2eGateway;
+                  const desktopSettled =
+                    (routeId !== "systems" && routeId !== "desktop-document") ||
+                    (() => {
+                      const panel = document.querySelector("openclaw-desktop-panel");
+                      const canvas =
+                        panel?.querySelector<HTMLCanvasElement>(".desktop-surface canvas");
+                      const pixel = canvas?.getContext("2d")?.getImageData(0, 0, 1, 1).data;
+                      const desktopRequests = gateway?.findRequests("desktop.observe") ?? [];
+                      const source = desktopRequests[0]?.params as
+                        | { source?: { kind?: string }; control?: boolean }
+                        | undefined;
+                      return (
+                        pixel?.join(",") === "24,180,160,255" &&
+                        source?.source?.kind === "host" &&
+                        source?.control === false &&
+                        panel?.querySelector('button[aria-label="Take control"]:not(:disabled)') !==
+                          null
+                      );
+                    })();
+                  const portalSettled =
+                    routeId !== "portals" ||
+                    (() => {
+                      const frame =
+                        document.querySelector<HTMLIFrameElement>(".portals-preview__frame");
+                      return (
+                        frame?.contentDocument?.querySelector("[data-route-probe-portal]")
+                          ?.textContent === "Route probe portal" &&
+                        frame.contentDocument.querySelector("button:not(:disabled)") !== null
+                      );
+                    })();
                   return (
+                    desktopSettled &&
+                    portalSettled &&
                     approvalsSettled &&
-                    snapshot?.routeReady &&
-                    snapshot.route?.status === "success" &&
-                    snapshot.route.matches[0]?.routeId === routeId &&
-                    snapshot.route.pendingMatches.length === 0 &&
+                    (routeId === "desktop-document" ||
+                      (snapshot?.routeReady &&
+                        snapshot.route?.status === "success" &&
+                        snapshot.route.matches[0]?.routeId === routeId &&
+                        snapshot.route.pendingMatches.length === 0)) &&
+                    requiredMethods.every(
+                      (method) => (gateway?.findRequests(method).length ?? 0) > 0,
+                    ) &&
                     [...document.querySelectorAll<HTMLElement>(selector)].some(
                       (node) =>
                         node.getClientRects().length &&
@@ -717,7 +886,11 @@ try {
                     )
                   );
                 },
-                { routeId: target.route, selector: target.selector },
+                {
+                  routeId: target.route,
+                  selector: target.selector,
+                  requiredMethods: target.requiredMethods ?? [],
+                },
                 { timeout: 30_000, polling: "raf" },
               );
               const readyMs = await page.evaluate(
