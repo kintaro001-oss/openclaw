@@ -1,13 +1,6 @@
 // Gateway Protocol schema module defines protocol validation shapes.
 import { Type } from "typebox";
 import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../client-info.js";
-import {
-  EXEC_SECRET_REF_ID_JSON_SCHEMA_PATTERN,
-  FILE_SECRET_REF_ID_ABSOLUTE_JSON_SCHEMA_PATTERN,
-  FILE_SECRET_REF_ID_INVALID_ESCAPE_JSON_SCHEMA_PATTERN,
-  SECRET_PROVIDER_ALIAS_PATTERN,
-  SINGLE_VALUE_FILE_REF_ID,
-} from "../secret-ref-contract.js";
 import { CHAT_SEND_SESSION_KEY_MAX_LENGTH } from "../session-limits.js";
 import { closedObject } from "./closed-object.js";
 import { USER_PROFILE_ID_MAX_LENGTH } from "./user-profile-constants.js";
@@ -18,6 +11,19 @@ import { USER_PROFILE_ID_MAX_LENGTH } from "./user-profile-constants.js";
  * Keep these schemas small and transport-oriented; feature-specific validation
  * belongs in the owning schema module or runtime handler.
  */
+/** Canonical id for file secret providers that expose exactly one value. */
+const SINGLE_VALUE_FILE_REF_ID = "value";
+
+/** Shared alias grammar for env/file/exec/store secret provider names. */
+const SECRET_PROVIDER_ALIAS_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+/** JSON-schema fragment that rejects absolute file secret ref ids. */
+const FILE_SECRET_REF_ID_ABSOLUTE_JSON_SCHEMA_PATTERN = "^/";
+/** JSON-schema fragment that rejects invalid JSON-pointer escape sequences. */
+const FILE_SECRET_REF_ID_INVALID_ESCAPE_JSON_SCHEMA_PATTERN = "~(?:[^01]|$)";
+/** JSON-schema pattern for exec secret ref ids, excluding dot-path traversal. */
+const EXEC_SECRET_REF_ID_JSON_SCHEMA_PATTERN =
+  "^(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$";
+
 const ENV_SECRET_REF_ID_RE = /^[A-Z][A-Z0-9_]{0,127}$/;
 const INPUT_PROVENANCE_KIND_VALUES = ["external_user", "inter_session", "internal_system"] as const;
 const SESSION_LABEL_MAX_LENGTH = 512;
