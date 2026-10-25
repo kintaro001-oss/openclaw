@@ -42,6 +42,15 @@
   z-index: 1;
 }
 
+.chat-author-avatar {
+  position: relative;
+}
+
+.chat-author-avatar__image {
+  position: absolute;
+  inset: 0;
+}
+
 .identity-avatar__hat {
   position: absolute;
   inset: 0;

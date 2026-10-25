@@ -479,7 +479,6 @@
 }
 
 .chat-author-avatar {
-  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -506,11 +505,6 @@
 .chat-author-avatar__image {
   display: block;
   object-fit: cover;
-}
-
-.chat-author-avatar__image {
-  position: absolute;
-  inset: 0;
 }
 
 .chat-author-avatar__initials {
