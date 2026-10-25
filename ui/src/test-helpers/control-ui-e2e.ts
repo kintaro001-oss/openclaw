@@ -59,6 +59,7 @@ import {
   extendControlUiE2eWaitTimeoutForSourceServer,
 } from "./control-ui-e2e-readiness.ts";
 import { getSharedControlUiE2ePreview } from "./control-ui-e2e-shared-preview.ts";
+import { normalizeControlUiMockAuth } from "./control-ui-mock-auth.ts";
 import { createControlUiMockDeferredRequests } from "./control-ui-mock-deferred-requests.ts";
 import { createControlUiMockPresence } from "./control-ui-mock-presence.ts";
 import { createControlUiMockReactions } from "./control-ui-mock-reactions.ts";
@@ -248,7 +249,7 @@ export type ControlUiMockGatewayScenario = {
   updateSchedule?: UpdateScheduleState | null;
   controlUiBuildSource?: "bundled" | "configured";
   serverVersion?: string;
-  deviceToken?: string;
+  deviceToken?: string | null;
   authMethod?: HelloOk["auth"]["method"];
   authMode?: HelloOk["snapshot"]["authMode"] | null;
   featureEvents?: string[];
@@ -803,9 +804,7 @@ function normalizeScenario(
     updateSchedule: scenario.updateSchedule ?? null,
     controlUiBuildSource: scenario.controlUiBuildSource ?? "bundled",
     serverVersion: scenario.serverVersion?.trim() || sharedBuildInfo?.version || "e2e",
-    deviceToken: scenario.deviceToken?.trim() || "e2e-device-token",
-    authMethod: scenario.authMethod ?? "token",
-    authMode: scenario.authMode ?? null,
+    ...normalizeControlUiMockAuth(scenario),
     featureEvents: scenario.featureEvents ?? [],
     // Baseline scenarios represent a current Gateway. Tests for unsupported or
     // mixed-version methods provide an explicit narrower catalog.
@@ -822,7 +821,6 @@ function normalizeScenario(
     inFlightRun: scenario.inFlightRun ?? null,
     presenceUsers: scenario.presenceUsers ?? [],
     models: scenario.models ?? [{ id: "gpt-5.5", name: "gpt-5.5", provider: "openai" }],
-    omitConnectHelloAuth: scenario.omitConnectHelloAuth ?? false,
     operatorSessionCap: scenario.operatorSessionCap ?? null,
     operatorScopes: scenario.operatorScopes ?? [
       "operator.admin",
@@ -1644,7 +1642,7 @@ function installControlUiMockGateway(
             ? {}
             : {
                 auth: {
-                  deviceToken: connectedDeviceToken,
+                  deviceToken: connectedDeviceToken ?? undefined,
                   method: scenario.authMethod,
                   recoveryMigrationAllowed: true as const,
                   recoveryScope: "e2e-recovery-scope",

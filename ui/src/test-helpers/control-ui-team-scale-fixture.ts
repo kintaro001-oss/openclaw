@@ -343,7 +343,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     authMethod: "trusted-proxy",
     authMode: "trusted-proxy",
     ...(options.transcriptAvatars
-      ? { omitConnectHelloAuth: true, hasMultipleSessionSharingIdentities: true }
+      ? { deviceToken: null, hasMultipleSessionSharingIdentities: true }
       : {}),
     assistantAgentId: "main",
     assistantName: "Harbor",

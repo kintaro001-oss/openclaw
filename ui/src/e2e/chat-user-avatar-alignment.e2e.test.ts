@@ -19,7 +19,7 @@ suite.define(() => {
       await installMockGateway(page, {
         authMethod: "trusted-proxy",
         authMode: "trusted-proxy",
-        omitConnectHelloAuth: true,
+        deviceToken: null,
         hasMultipleSessionSharingIdentities: true,
         sessions: [{ key: "agent:main:main", visibility: "shared", sharingRole: "owner" }],
         presenceUsers: [{ ...viewer, identity: viewer, self: true }],
