@@ -1,8 +1,4 @@
-import {
-  PROVIDER_POST_DISPATCH_AMBIGUITY_ERROR_CODE,
-  type Api,
-  type ProviderReplayState,
-} from "@openclaw/llm-core/types";
+import { PROVIDER_POST_DISPATCH_AMBIGUITY_ERROR_CODE, type Api } from "@openclaw/llm-core/types";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type {
   FunctionTool,
@@ -19,7 +15,6 @@ import type {
   OpenAIReasoningEffort,
 } from "../providers/openai-reasoning-effort.js";
 import type { OpenAIRequestReasoningEffort } from "../providers/openai-request-reasoning.js";
-import type { OpenAIResponsesCompactedWindow } from "./openai-responses-compaction-window.js";
 import { isResponsesServiceTierRejection } from "./openai-responses-service-tier.js";
 
 export const OPENAI_RESPONSES_REASONING_REPLAY_META_KEY = "__openclaw_replay";
@@ -158,16 +153,6 @@ export type ReplayableResponseReasoningItem = Omit<ResponseReasoningItem, "id"> 
   id?: string;
   [OPENAI_RESPONSES_REASONING_REPLAY_META_KEY]?: OpenAIResponsesReasoningReplayMetadata;
 };
-export type OpenAIResponsesCompactionReplayState = ProviderReplayState & {
-  compactedWindow?: OpenAIResponsesCompactedWindow;
-} & (
-    | { type: typeof OPENAI_RESPONSES_COMPACTION_REPLAY_TYPE; baseUrlHash: string }
-    | {
-        type: typeof OPENAI_RESPONSES_RETAINED_COMPACTION_REPLAY_TYPE;
-        baseUrlHash: string;
-        replayIndex?: never;
-      }
-  );
 
 export type OpenAIResponsesOptions = BaseOpenAIStreamOptions & {
   reasoning?: OpenAIRequestReasoningEffort;

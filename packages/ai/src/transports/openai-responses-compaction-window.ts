@@ -17,9 +17,6 @@ const COMPACTION_WINDOW_MAX_BYTES = 16 * 1024 * 1024;
 export type OpenAIResponsesCompactionOutput = Array<
   ResponseInputItem.Message | ReplayableResponseOutputMessage | ReplayableResponseCompactionItem
 >;
-export type OpenAIResponsesCompactedWindow =
-  | { state: "ready"; output: string; outputTokens?: number }
-  | { state: "refresh-required" };
 
 // Schema validation, not coercion: supplied non-string fields must be rejected.
 function isOptionalCompactionString(value: unknown): boolean {
