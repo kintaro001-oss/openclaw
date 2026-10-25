@@ -69,7 +69,7 @@ describe("routed transcript prewarm", () => {
   it("reads raw records without validation and rejects malformed prewarm when consumed", async () => {
     await seed();
     const invalid = {
-      projectionVersion: 3,
+      projectionVersion: 4,
       savedAt: Date.now(),
       sessionKey: key,
       sessionId: stored.sessionId,
