@@ -259,6 +259,6 @@ export const contact = (identifier: number, target: EventTarget): Touch => ({
 });
 
 export function renderReadyRows(session: ChatTranscriptSession, rows: readonly TranscriptRow[]) {
-  session.setContentReady(true);
+  session.layout.ready = true;
   return session.render(rows, (row) => (row.kind === "content" ? row.content : null), null, false);
 }
