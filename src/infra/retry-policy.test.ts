@@ -1,7 +1,7 @@
 // Covers channel API retry policy behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createChannelApiRetryRunner } from "../plugin-sdk/retry-runtime.js";
 import { parseRetryAfterHeaderSeconds } from "./retry-after.js";
-import { createChannelApiRetryRunner } from "./retry-policy.js";
 
 const ZERO_DELAY_RETRY = { attempts: 3, minDelayMs: 0, maxDelayMs: 0, jitter: 0 };
 type RunnerOptions = Parameters<typeof createChannelApiRetryRunner>[0];
