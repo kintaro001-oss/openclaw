@@ -11,8 +11,22 @@ import {
   resolveOpenAIReasoningEffortMapping,
   supportsOpenAIReasoningEffort,
 } from "../providers/openai-reasoning-effort.js";
-import { isKnownOpenAIJsonSchemaModelId } from "../providers/openai-response-format.js";
 import { resolveProviderRequestCapabilities as resolveModelProviderRequestCapabilities } from "./host-policy.js";
+
+function isKnownOpenAIJsonSchemaModelId(modelId: string | undefined): boolean {
+  if (typeof modelId !== "string") {
+    return false;
+  }
+  if (/^gpt-5(?:[.-]|$)/i.test(modelId) || /^gpt-4\.1(?:-|$)/i.test(modelId)) {
+    return true;
+  }
+  const gpt4o = /^gpt-4o(-mini)?(?:-(\d{4}-\d{2}-\d{2}))?$/i.exec(modelId);
+  if (gpt4o) {
+    const snapshot = gpt4o[2];
+    return !snapshot || snapshot >= (gpt4o[1] ? "2024-07-18" : "2024-08-06");
+  }
+  return /^(?:o1|o3(?:-mini|-pro)?|o4-mini)(?:-\d{4}-\d{2}-\d{2})?$/i.test(modelId);
+}
 
 type OpenAICompletionsSessionAffinity = "none" | "openai" | "openrouter";
 

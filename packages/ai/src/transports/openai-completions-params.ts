@@ -20,10 +20,7 @@ import {
   resolveOpenAIRequestReasoning,
   resolveOpenAISimpleReasoningEffort,
 } from "../providers/openai-request-reasoning.js";
-import {
-  resolveOpenAICompletionsResponseFormat,
-  shouldOmitOllamaCompatResponseFormat,
-} from "../providers/openai-response-format.js";
+import { resolveOpenAICompletionsResponseFormat } from "../providers/openai-response-format.js";
 import {
   projectOpenAITools,
   prepareOpenAITools,
@@ -65,6 +62,22 @@ import {
   type OpenAIModeModel,
 } from "./openai-transport-shared.js";
 import { supportsModelTools } from "./transport-utils.js";
+
+const OLLAMA_CLOUD_ORIGIN = "https://ollama.com";
+
+function shouldOmitOllamaCompatResponseFormat(params: {
+  provider: string;
+  baseUrl: string;
+  hasTools: () => boolean;
+}): boolean {
+  if (!params.provider.includes("ollama")) {
+    return false;
+  }
+  if (params.hasTools()) {
+    return true;
+  }
+  return URL.parse(params.baseUrl)?.origin === OLLAMA_CLOUD_ORIGIN;
+}
 
 function isKnownOpenAICompletionsEndpoint(model: Pick<Model, "baseUrl">): boolean {
   if (!model.baseUrl.trim() || isNativeOpenAIEndpoint(model)) {

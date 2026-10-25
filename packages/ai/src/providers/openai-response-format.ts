@@ -2,36 +2,6 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { ResponseFormatTextConfig } from "openai/resources/responses/responses.js";
 
 const JSON_SCHEMA_RESPONSE_FORMAT_NAME = "openclaw_response";
-const OLLAMA_CLOUD_ORIGIN = "https://ollama.com";
-
-export function isKnownOpenAIJsonSchemaModelId(modelId: string | undefined): boolean {
-  if (typeof modelId !== "string") {
-    return false;
-  }
-  if (/^gpt-5(?:[.-]|$)/i.test(modelId) || /^gpt-4\.1(?:-|$)/i.test(modelId)) {
-    return true;
-  }
-  const gpt4o = /^gpt-4o(-mini)?(?:-(\d{4}-\d{2}-\d{2}))?$/i.exec(modelId);
-  if (gpt4o) {
-    const snapshot = gpt4o[2];
-    return !snapshot || snapshot >= (gpt4o[1] ? "2024-07-18" : "2024-08-06");
-  }
-  return /^(?:o1|o3(?:-mini|-pro)?|o4-mini)(?:-\d{4}-\d{2}-\d{2})?$/i.test(modelId);
-}
-
-export function shouldOmitOllamaCompatResponseFormat(params: {
-  provider: string;
-  baseUrl: string;
-  hasTools: () => boolean;
-}): boolean {
-  if (!params.provider.includes("ollama")) {
-    return false;
-  }
-  if (params.hasTools()) {
-    return true;
-  }
-  return URL.parse(params.baseUrl)?.origin === OLLAMA_CLOUD_ORIGIN;
-}
 
 /**
  * Maps the shared JSON Schema option to Chat Completions while preserving the
