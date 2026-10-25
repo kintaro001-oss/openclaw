@@ -8,17 +8,22 @@ import {
   PROVIDER_FAILURE_WITH_OUTPUT_ERROR_CODE,
   REPETITIVE_OUTPUT_ERROR_CODE,
 } from "@openclaw/llm-core";
-import type { AssistantMessage, Context, ToolResultMessage } from "@openclaw/llm-core";
+import type {
+  AssistantMessage,
+  Context,
+  StreamOptions,
+  ToolResultMessage,
+  UserMessage,
+} from "@openclaw/llm-core";
 import { AssistantRepetitionGuard } from "./assistant-repetition-guard.js";
 import { REPETITIVE_OUTPUT_ERROR_MESSAGE } from "./errors.js";
 import { uuidv7 } from "./harness/session/uuid.js";
-import { copyInternalToolResultState } from "./internal-hooks.js";
+import { copyInternalToolResultState, getInternalSteeringQueueObserver } from "./internal-hooks.js";
 import {
   type AgentCoreStreamRuntimeDeps,
   resolveAgentCoreStreamFn,
   runAgentCoreStream,
 } from "./runtime-deps.js";
-import { createStreamSteering } from "./stream-steering.js";
 import { mergeToolExecutionFailure } from "./tool-batch-completion.js";
 import type { FinalizedToolCallOutcome } from "./tool-call-outcome.js";
 import { resolveAgentAssistantTurnId } from "./tool-execution-context.js";
@@ -139,6 +144,104 @@ export async function emitToolResultMessage(
   const event = { type: "message_end" as const, message };
   await emit(event);
   return event.message;
+}
+
+/** Forward queued input while its normal transcript owner retains commit ordering. */
+function createStreamSteering(
+  config: AgentLoopConfig,
+  signal: AbortSignal | undefined,
+  convertSteering: AgentLoopConfig["convertToLlm"],
+) {
+  const observer = getInternalSteeringQueueObserver(config.getSteeringMessages);
+  let open = true;
+  let cleanup: (() => void) | undefined;
+  let forwarding = Promise.resolve();
+  let needsContinuation: (() => boolean) | undefined;
+  let finished: Promise<boolean> | undefined;
+  let failure: { error: unknown } | undefined;
+  let submitted = false;
+  const stop = () => {
+    open = false;
+    if (observer) {
+      observer.onChange = undefined;
+    }
+    const release = cleanup;
+    cleanup = undefined;
+    release?.();
+  };
+  const onActiveResponse: NonNullable<StreamOptions["onActiveResponse"]> = (control) => {
+    if (!open || signal?.aborted) {
+      return undefined;
+    }
+    needsContinuation = control.needsContinuation;
+    cleanup = config.onActiveResponse?.(control) ?? undefined;
+    const forward = () => {
+      if (!open || signal?.aborted || failure || !observer || submitted) {
+        return;
+      }
+      const messages = observer.peek();
+      if (messages.length === 0) {
+        return;
+      }
+      // One batch owns this response's continuation. Later arrivals can steer
+      // its successor, without changing an already accepted context projection.
+      submitted = true;
+      // Reserve before conversion or network awaits: once a submission may have
+      // crossed the wire, local cancellation must not claim it was withdrawn.
+      const release = observer.reserve(messages);
+      let dispatched = false;
+      forwarding = forwarding
+        .then(async () => {
+          if (!open || signal?.aborted) {
+            release();
+            return;
+          }
+          const converted = await convertSteering([...messages]);
+          const userMessages = converted.filter(
+            (message): message is UserMessage => message.role === "user",
+          );
+          if (
+            !open ||
+            signal?.aborted ||
+            userMessages.length !== converted.length ||
+            userMessages.length === 0
+          ) {
+            release();
+            stop();
+            return;
+          }
+          dispatched = true;
+          if (!(await control.steer(userMessages))) {
+            release();
+            stop();
+          }
+        })
+        .catch((error: unknown) => {
+          if (!dispatched) {
+            release();
+          }
+          failure ??= { error };
+        });
+    };
+    if (observer) {
+      observer.onChange = forward;
+    }
+    forward();
+    return stop;
+  };
+  return {
+    onActiveResponse,
+    finish() {
+      return (finished ??= (async () => {
+        stop();
+        await forwarding;
+        if (failure) {
+          throw failure.error;
+        }
+        return needsContinuation?.() === true;
+      })());
+    },
+  };
 }
 
 export async function streamAgentResponse(
