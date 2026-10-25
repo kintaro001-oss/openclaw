@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RuntimeEnv } from "../../runtime.js";
 import {
   addAllowlistUserEntriesFromConfigEntry,
   buildAllowlistResolutionSummary,
   patchAllowlistUsersInConfigEntries,
   summarizeMapping,
-} from "./resolve-utils.js";
+} from "../../plugin-sdk/allow-from.js";
+import type { RuntimeEnv } from "../../runtime.js";
 
 describe("buildAllowlistResolutionSummary", () => {
   it("returns mapping, additions, and unresolved (including missing ids)", () => {

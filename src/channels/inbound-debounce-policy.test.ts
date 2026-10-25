@@ -5,7 +5,7 @@ import type { OpenClawConfig } from "../config/types.js";
 import {
   createChannelInboundDebouncer,
   shouldDebounceTextInbound,
-} from "./inbound-debounce-policy.js";
+} from "../plugin-sdk/channel-inbound.js";
 
 describe("shouldDebounceTextInbound", () => {
   it("rejects blank text, media, and control commands", () => {

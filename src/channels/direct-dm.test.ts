@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { dispatchInboundDirectDm } from "./direct-dm.js";
+import { dispatchInboundDirectDm } from "../plugin-sdk/channel-inbound.js";
 import { buildChannelInboundEventContext } from "./inbound-event/context.js";
 import { resolveStableChannelIngressPolicy } from "./message-access/runtime.js";
 
@@ -8,7 +8,8 @@ const mocks = vi.hoisted(() => ({
   onModelSelected: vi.fn(),
 }));
 
-vi.mock("./inbound-event/context.js", () => ({
+vi.mock("./inbound-event/context.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./inbound-event/context.js")>()),
   buildChannelInboundEventContext: vi.fn(() => ({ Body: "envelope:hello" })),
 }));
 
@@ -33,7 +34,8 @@ vi.mock("./message/reply-pipeline.js", () => ({
   })),
 }));
 
-vi.mock("./turn/lifecycle.js", () => ({
+vi.mock("./turn/lifecycle.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./turn/lifecycle.js")>()),
   dispatchRoutedChannelTurn: mocks.dispatchRoutedChannelTurn,
 }));
 

@@ -1,8 +1,8 @@
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import { resolveInboundSessionEnvelopeContext } from "../plugin-sdk/channel-inbound.js";
 import { useSessionStoreTempDirs } from "../test-utils/session-state-cleanup.js";
-import { resolveInboundSessionEnvelopeContext } from "./session-envelope.js";
 
 describe("resolveInboundSessionEnvelopeContext", () => {
   const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-session-envelope-");

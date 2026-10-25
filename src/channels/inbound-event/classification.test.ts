@@ -4,7 +4,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   classifyChannelInboundEvent,
   resolveUnmentionedGroupInboundPolicy,
-} from "./classification.js";
+} from "../../plugin-sdk/channel-inbound.js";
 
 describe("classifyChannelInboundEvent", () => {
   it("defaults inbound messages to user requests", () => {
