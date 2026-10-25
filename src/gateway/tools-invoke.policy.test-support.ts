@@ -17,7 +17,7 @@ import type { OpenClawPluginToolContext } from "../plugins/tool-types.js";
 import { defaultSkillUploadStore } from "../skills/lifecycle/upload-store.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { createGatewayMethodRegistry, type GatewayMethodRegistry } from "./methods/registry.js";
-import { skillsUploadHandlers } from "./server-methods/skills-upload.js";
+import { skillsHandlers } from "./server-methods/skills.js";
 import type { GatewayRequestHandler } from "./server-methods/types.js";
 import { dispatchGatewayMethodInProcess } from "./server-plugin-in-process-dispatch.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
@@ -130,7 +130,7 @@ export function registerToolsInvokeUploadTests({
       getConfig().skills = { install: { allowUploadedArchives: true } };
       registerMethod(
         "skills.upload.begin",
-        expectDefined(skillsUploadHandlers["skills.upload.begin"], "upload begin"),
+        expectDefined(skillsHandlers["skills.upload.begin"], "upload begin"),
         "skills",
       );
       let reachedStorage = false;

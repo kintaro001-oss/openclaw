@@ -11,7 +11,7 @@ import {
   type OpenClawTestState,
 } from "../../test-utils/openclaw-test-state.js";
 import { createDirectChatContext } from "../server-chat.agent-events.test-helpers.js";
-import { skillsUploadHandlers } from "./skills-upload.js";
+import { skillsHandlers } from "./skills.js";
 import { callGatewayHandler } from "./skills.test-helpers.js";
 
 let state: OpenClawTestState;
@@ -28,7 +28,7 @@ function setEnabled(enabled: boolean) {
   };
 }
 function call(stage: string, params: Record<string, unknown>) {
-  return callGatewayHandler(skillsUploadHandlers, `skills.upload.${stage}`, params, { context });
+  return callGatewayHandler(skillsHandlers, `skills.upload.${stage}`, params, { context });
 }
 function expectDisabled(result: Awaited<ReturnType<typeof call>>) {
   expect.soft(result).toMatchObject({

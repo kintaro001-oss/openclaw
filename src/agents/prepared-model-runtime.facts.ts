@@ -6,11 +6,13 @@ import {
   collectConfiguredModelRefs,
   type ConfiguredModelRef,
 } from "@openclaw/model-catalog-core/configured-model-refs";
+import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { hashRuntimeConfigValue } from "../config/runtime-snapshot.js";
 import { projectConfigOntoRuntimeSourceSnapshot } from "../config/runtime-source-projection.js";
 import { prepareMediaCapabilityProviders } from "../plugins/capability-provider-runtime.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
+import { nativePluginBindings } from "../plugins/loader-runtime-load.js";
 import { resolvePluginMetadataSnapshotAsync } from "../plugins/plugin-metadata-snapshot.js";
 import {
   getPreparedMessageToolCatalog,
@@ -22,7 +24,10 @@ import { getPluginRegistryInspectionResources } from "../plugins/registry-inspec
 import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import { resolveRuntimeSyntheticAuthProviderRefs } from "../plugins/synthetic-auth.runtime.js";
 import { prepareAmbientAgentCredentialsForDiscovery } from "./agent-auth-discovery.js";
-import { discoverModelsFromCapturedSources } from "./agent-model-discovery.js";
+import {
+  discoverAuthStorageFacts,
+  discoverModelsFromCapturedSources,
+} from "./agent-model-discovery.js";
 import { withAgentRosterFactsBatch } from "./agent-scope-config.js";
 import { getPreparedRuntimeAuthProfileStoreSnapshotCore } from "./auth-profiles/runtime-snapshots.js";
 import {
@@ -36,7 +41,6 @@ import { parseConfiguredModelVisibilityEntries } from "./model-selection-shared.
 import { prepareImplicitProviderStaticCatalog } from "./models-config.providers.implicit.js";
 import { loadPersistedPluginModelCatalogs } from "./plugin-model-catalog-execution.js";
 import { resolvePluginModelCatalogOwnerPluginId } from "./plugin-model-catalog.js";
-import { prepareAgentFacts } from "./prepared-model-runtime.agent-facts.js";
 import type {
   PreparedModelRuntimeAgentBaseFacts,
   PreparedModelRuntimeAgentFacts,
@@ -353,15 +357,81 @@ export async function prepareWorkspaceBuildGroup(
       await nextTurn();
       options.assertCurrent?.(candidate);
       options.onBeforeAuthCapture?.(candidate);
+      const assertCurrent = () => options.assertCurrent?.(candidate);
+      const additionalProviderIds =
+        options.providerDiscoveryProviderIds === undefined
+          ? []
+          : options.providerDiscoveryProviderIds;
+      const includeCredentialProviders =
+        options.includeCredentialProviders === undefined
+          ? catalogMode === "live"
+          : options.includeCredentialProviders;
+      const agentEnv = candidate.env ?? process.env;
+      const preparedStore =
+        await nativePluginBindings.authStore.prepareAuthProfileStoreForModelRuntime(
+          candidate.agentDir,
+          {
+            config: candidate.config,
+            inheritedAuthDir: candidate.inheritedAuthDir,
+            skipCredentials: candidate.skipCredentials,
+          },
+          assertCurrent,
+          agentEnv,
+        );
+      assertCurrent();
+      const authFacts = await discoverAuthStorageFacts(candidate.agentDir, {
+        config: candidate.config,
+        // Prepared owners consume only the already-published runtime auth generation. External CLI
+        // hydration belongs to startup/control-plane and turn-time producers, never rebuilds.
+        readOnly: true,
+        ambientCredentials,
+        ...(preparedStore ? { preparedStore } : {}),
+        ...(candidate.skipCredentials ? { skipCredentials: true } : {}),
+        ...(candidate.inheritedAuthDir ? { inheritedAuthDir: candidate.inheritedAuthDir } : {}),
+        ...(candidate.workspaceDir ? { workspaceDir: candidate.workspaceDir } : {}),
+        ...(candidate.env ? { env: agentEnv } : {}),
+      });
       agentBaseFacts.push(
-        await prepareAgentFacts(
-          candidate,
-          catalogMode,
-          ambientCredentials,
-          () => options.assertCurrent?.(candidate),
-          options.providerDiscoveryProviderIds,
-          options.includeCredentialProviders,
-        ),
+        withAgentRosterFactsBatch(candidate.config, (): PreparedModelRuntimeAgentBaseFacts => {
+          const credentials = authFacts.credentials;
+          const templateAuthStorage = authFacts.authStorage;
+          const rawConfiguredModelRefs = collectPreparedModelRuntimeConfiguredRefs(
+            candidate.config,
+            candidate.agentId,
+            candidate.readOnly ? candidate.runtimePluginSelections : undefined,
+          );
+          return {
+            input: candidate,
+            env: agentEnv,
+            authStore: authFacts.store,
+            templateAuthStorage,
+            credentials,
+            // Keep order and case-distinct refs: registry lookup remains exact-case even
+            // where static/dynamic completion deduplicates case-insensitive merge keys.
+            configuredModelRefs: rawConfiguredModelRefs.flatMap(({ value }) => {
+              const ref = parseModelCatalogRef(value);
+              return ref ? [ref] : [];
+            }),
+            // Gateway startup prepares only providers named by config/model selection. An unrelated
+            // stored credential must not pull that provider's complete catalog into the admission path.
+            providerIds: [
+              ...new Set([
+                ...collectPreparedModelRuntimeProviderIds(
+                  candidate.config,
+                  credentials,
+                  includeCredentialProviders,
+                  rawConfiguredModelRefs,
+                  candidate.agentId,
+                ),
+                ...parseConfiguredModelVisibilityEntries({
+                  cfg: candidate.config,
+                  agentId: candidate.agentId,
+                }).providerWildcards,
+                ...additionalProviderIds.map(normalizeProviderId).filter(Boolean),
+              ]),
+            ].toSorted((left, right) => left.localeCompare(right)),
+          };
+        }),
       );
     }
     const agentFactsMs = performance.now() - agentFactsStartedAt;

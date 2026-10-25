@@ -70,7 +70,7 @@ type CallResult = {
   error?: { code?: string; message?: string };
 };
 
-async function makeHarness(uploadOnly = false) {
+async function makeHarness() {
   const { createOpenClawTestState } = await import("../../test-utils/openclaw-test-state.js");
   const testState = await createOpenClawTestState({
     layout: "state-only",
@@ -80,9 +80,7 @@ async function makeHarness(uploadOnly = false) {
   const stateDir = testState.stateDir;
   const workspaceDir = testState.workspaceDir;
   agentScopeState.workspaceDir = workspaceDir;
-  const handlers = uploadOnly
-    ? (await import("./skills-upload.js")).skillsUploadHandlers
-    : (await import("./skills.js")).skillsHandlers;
+  const handlers = (await import("./skills.js")).skillsHandlers;
   return {
     handlers,
     stateDir,
@@ -269,9 +267,9 @@ describe("skill upload gateway handlers", () => {
   });
 
   it.each([true, false])(
-    "stages and commits without caller-thread SQLite (upload-only: %s)",
+    "stages and commits without caller-thread SQLite (without initial digest: %s)",
     async (uploadOnly) => {
-      const { begin, chunk, commit, stateDir } = await makeHarness(uploadOnly);
+      const { begin, chunk, commit, stateDir } = await makeHarness();
       const archive = Buffer.from("worker-owned archive commit");
       const digest = sha256(archive);
       await closeOpenClawStateDatabaseAsync();
