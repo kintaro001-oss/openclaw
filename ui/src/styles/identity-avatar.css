@@ -59,6 +59,7 @@
   z-index: 2;
 }
 
+.identity-avatar--agent:not(.is-fallback) > .identity-avatar__image + .identity-avatar__fallback,
 .identity-avatar--agent.is-fallback > .identity-avatar__image,
 .identity-avatar--agent.is-pending > * {
   visibility: hidden;
