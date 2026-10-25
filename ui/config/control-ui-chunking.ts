@@ -221,6 +221,13 @@ export function controlUiStableChunkName(id: string): string | undefined {
     case "ui/src/components/markdown-streaming.ts":
     case "ui/src/components/markdown-tokens.ts":
       return "markdown-streaming-runtime";
+    case "ui/src/components/solid/panel-loading-skeleton.tsx":
+    case "ui/src/styles/panel-loading-skeleton.css":
+    case "ui/src/components/desktop/desktop-source.ts":
+      return "deferred-ui-support";
+    case "ui/src/styles/session-panel-rail.css":
+      // Normal rail CSS shares the route sheet; the link reader imports its text.
+      return /[?&]inline(?:[=&]|$)/u.test(id) ? "deferred-ui-support" : undefined;
     case "ui/src/pages/chat/session-snapshot-database.ts":
       // Warm boot reads while the Gateway connects; the chat boot group made it wait for the whole route.
       return "session-snapshot-database";
@@ -338,9 +345,11 @@ export function createControlUiCodeSplitting(options: { includeBootGroups?: bool
               );
               if (route === "shared") {
                 styles.add("ui/src/components/solid/text-overflow.css");
+                styles.add("ui/src/styles/session-panel-rail.css");
               }
               if (route === "chat") {
                 styles.delete("ui/src/components/solid/text-overflow.css");
+                styles.delete("ui/src/styles/session-panel-rail.css");
                 // These optional views share the route's preloaded stylesheet.
                 styles.add("ui/src/pages/chat/components/chat-pane-mobile-header.css");
                 styles.add("ui/src/pages/chat/components/chat-pane-mobile-composition.css");
