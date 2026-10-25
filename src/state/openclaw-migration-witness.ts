@@ -13,6 +13,7 @@ import { runSqliteReadSnapshotSync } from "../infra/sqlite-transaction.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
 import { LEGACY_CANONICAL_VALIDATION_TRIGGER_NAMES } from "./openclaw-agent-canonical-validation-migration.js";
 import {
+  AGENT_COLD_ARCHIVE_CHUNKS_SCHEMA_VERSION,
   AGENT_INDEX_RETIREMENT_SCHEMA_VERSION,
   AGENT_MEMORY_REVISION_SCHEMA_VERSION,
   AGENT_WRITE_LAYOUT_SCHEMA_VERSION,
@@ -26,6 +27,7 @@ import {
 import { AGENT_JSON_PREDICATE_COLUMNS } from "./openclaw-agent-json-predicate-schema.js";
 import { LEGACY_MEMORY_REVISION_TRIGGER_NAMES } from "./openclaw-agent-memory-revision-migration.js";
 import { withoutOutboxEnqueueSequence } from "./openclaw-agent-outbox-sequence-migration.js";
+import { assertMigrationWitnessRegistryPreserved } from "./openclaw-migration-witness-registry.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import { assertCurrentStateRuntimeSchema } from "./openclaw-state-db-fast-path.js";
 import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
@@ -63,7 +65,7 @@ const witnessSchema = z
   })
   .strict();
 
-type OpenClawMigrationWitness = z.infer<typeof witnessSchema>;
+export type OpenClawMigrationWitness = z.infer<typeof witnessSchema>;
 type OpenClawMigrationWitnessOwner = { role: "agent"; agentId: string } | { role: "global" };
 
 const derivedMigrationColumns = new Map<string, ReadonlySet<string>>(
@@ -111,7 +113,9 @@ function parseOpenClawMigrationWitness(value: unknown): OpenClawMigrationWitness
   if (
     (witness.role === "agent" &&
       (witness.agentId === null ||
-        ![24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36].includes(witness.schemaVersion))) ||
+        ![24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37].includes(
+          witness.schemaVersion,
+        ))) ||
     (witness.role !== "agent" && witness.agentId !== null) ||
     (witness.role !== "agent" && witness.schemaSha256 !== witness.migrationSchemaSha256) ||
     (witness.role !== "global" && witness.registryMigrationBinding !== null) ||
@@ -130,6 +134,9 @@ function parseOpenClawMigrationWitness(value: unknown): OpenClawMigrationWitness
           "transcript_events",
           "session_key_contract",
           "session_canonical_validation_pending",
+          ...(witness.schemaVersion >= AGENT_COLD_ARCHIVE_CHUNKS_SCHEMA_VERSION
+            ? ["session_transcript_cold_archive_chunks"]
+            : []),
         ]
       : witness.role === "global"
         ? ["schema_meta", "config_machine_state"]
@@ -421,7 +428,7 @@ export function captureOpenClawMigrationWitness(
         throw new Error("Migration witness database owner does not match the backup inventory");
       }
       if (owner.role === "agent") {
-        if (![24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36].includes(schemaVersion)) {
+        if (![24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37].includes(schemaVersion)) {
           throw new Error(`Unsupported agent migration witness schema: ${schemaVersion}`);
         }
         assertOpenClawAgentSchemaContains(
@@ -499,6 +506,15 @@ export function captureOpenClawMigrationWitness(
         continue;
       }
       schemaHash.update(JSON.stringify(object)).update("\n");
+      // Schema 37 adds only this empty companion. Admission validates its canonical
+      // definition; the crossing comparison below still rejects added chunk rows.
+      if (
+        role === "agent" &&
+        schemaVersion >= AGENT_COLD_ARCHIVE_CHUNKS_SCHEMA_VERSION &&
+        object.tbl_name === "session_transcript_cold_archive_chunks"
+      ) {
+        continue;
+      }
       // Admission validates canonical objects before migration-only normalization.
       const indexKey = `${object.tbl_name}.${object.name}`;
       if (
@@ -662,32 +678,19 @@ export function assertOpenClawMigrationWitnessPreserved(
   ) {
     throw new Error("Migration changed or lost retained database schema");
   }
-  if (current.registryMigrationBinding) {
-    const originalRows = new Map(
-      (original.tables.find((table) => table.name === "agent_databases")?.registryRows ?? []).map(
-        (row) => [row.locator, row],
-      ),
-    );
-    const currentRows = current.tables.find(
-      (table) => table.name === "agent_databases",
-    )?.registryRows;
-    if (!currentRows || originalRows.size !== currentRows.length) {
-      throw new Error("Missing registry row witnesses");
-    }
-    for (const row of currentRows) {
-      const before = originalRows.get(row.locator);
-      if (
-        !before ||
-        before.store !== row.store ||
-        (row.schemaVersion !== OPENCLAW_AGENT_SCHEMA_VERSION && row.sha256 !== before.sha256)
-      ) {
-        throw new Error("Unrefreshed registry alias changed during migration");
-      }
-    }
-  }
+  assertMigrationWitnessRegistryPreserved(original, current);
   const projected = (witness: OpenClawMigrationWitness) =>
     witness.tables
       .filter((table) => !crossing || table.name !== "session_canonical_validation_pending")
+      .filter(
+        (table) =>
+          !(
+            crossing &&
+            original.schemaVersion < AGENT_COLD_ARCHIVE_CHUNKS_SCHEMA_VERSION &&
+            table.name === "session_transcript_cold_archive_chunks" &&
+            table.rowCount === 0
+          ),
+      )
       .map((table) => ({
         name: table.name,
         columns: crossing

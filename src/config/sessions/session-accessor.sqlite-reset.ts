@@ -35,7 +35,12 @@ import {
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { readSessionColdChunks } from "./session-cold-storage-chunks.js";
 import { resolveSessionColdArchivePath } from "./session-cold-storage-codec.js";
+import {
+  sessionColdArchiveMetadataColumns,
+  type SessionColdArchive,
+} from "./session-cold-storage-state.js";
 import { collectAdmissionProtectedSessionIds } from "./session-history-eviction.js";
 import { deleteSessionTranscriptIndexInTransaction } from "./session-transcript-index.js";
 import type { SessionStoreTarget as SessionStoreResetScope } from "./targets-collision.js";
@@ -58,9 +63,13 @@ function readResetInventory(database: OpenClawAgentReadOnlyDatabase) {
       database.db,
       db
         .selectFrom("session_transcript_cold_archives")
-        .select(["session_id", "generation", "archive_name", "archive_sha256", "storage"])
+        .select(sessionColdArchiveMetadataColumns)
         .orderBy("session_id"),
-    ).rows,
+    ).rows.map((archive) =>
+      Object.assign(archive, {
+        chunks: readSessionColdChunks(database.db, archive),
+      }),
+    ),
     archives: readSessionTranscriptArchiveResetInventory(database),
   };
 }
@@ -83,6 +92,9 @@ function listResetArtifacts(
     }),
     ...(inventory?.cold ?? [])
       .filter(({ storage }) => storage === "file")
+      .flatMap<Pick<SessionColdArchive, "archive_name" | "archive_sha256">>((archive) =>
+        archive.chunks.length > 0 ? archive.chunks : [archive],
+      )
       .map(({ archive_name, archive_sha256 }) => ({
         path: resolveSessionColdArchivePath(databasePath, archive_name),
         sha256: archive_sha256,

@@ -5,9 +5,13 @@ import {
   getNodeSqliteKysely,
 } from "../../infra/kysely-sync.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
+import { readSessionColdChunks } from "./session-cold-storage-chunks.js";
 import { readVerifiedSessionColdArchive } from "./session-cold-storage-codec.js";
 
-type ColdSnapshotDatabase = Pick<DB, "session_transcript_cold_archives"> & {
+type ColdSnapshotDatabase = Pick<
+  DB,
+  "session_transcript_cold_archives" | "session_transcript_cold_archive_chunks"
+> & {
   sqlite_schema: { name: string | null; type: string };
 };
 
@@ -29,6 +33,17 @@ export async function embedSessionColdArchivesInSnapshot(params: {
   ) {
     return;
   }
+  // Historical snapshots predate the chunk table and retain their single-file contract.
+  const hasChunks = Boolean(
+    executeSqliteQueryTakeFirstSync(
+      params.database,
+      db
+        .selectFrom("sqlite_schema")
+        .select("name")
+        .where("type", "=", "table")
+        .where("name", "=", "session_transcript_cold_archive_chunks"),
+    ),
+  );
 
   let previousSessionId: string | undefined;
   while (true) {
@@ -46,10 +61,38 @@ export async function embedSessionColdArchivesInSnapshot(params: {
     }
     // The copied row fixes the generation. Immutable source files survive
     // restoration, so a live restore cannot invalidate this snapshot's read.
-    const bytes = await readVerifiedSessionColdArchive({
-      storePath: params.sourceStorePath,
-      archive,
-    });
+    const chunks = hasChunks ? readSessionColdChunks(params.database, archive) : [];
+    for (const chunk of chunks) {
+      const embedded =
+        archive.storage === "sqlite"
+          ? executeSqliteQueryTakeFirstSync(
+              params.database,
+              db
+                .selectFrom("session_transcript_cold_archive_chunks")
+                .select("archive_blob")
+                .where("session_id", "=", archive.session_id)
+                .where("chunk_index", "=", chunk.chunk_index),
+            )?.archive_blob
+          : null;
+      const bytes = await readVerifiedSessionColdArchive({
+        storePath: params.sourceStorePath,
+        archive: { ...chunk, storage: archive.storage, archive_blob: embedded ?? null },
+      });
+      if (archive.storage === "file") {
+        executeSqliteQuerySync(
+          params.database,
+          db
+            .updateTable("session_transcript_cold_archive_chunks")
+            .set({ archive_blob: bytes })
+            .where("session_id", "=", archive.session_id)
+            .where("chunk_index", "=", chunk.chunk_index),
+        );
+      }
+    }
+    const bytes =
+      chunks.length > 0
+        ? Buffer.alloc(0)
+        : await readVerifiedSessionColdArchive({ storePath: params.sourceStorePath, archive });
     if (archive.storage === "file") {
       executeSqliteQuerySync(
         params.database,
