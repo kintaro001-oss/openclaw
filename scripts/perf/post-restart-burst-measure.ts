@@ -2074,13 +2074,15 @@ async function measureColdRowReads(
   await ready(restarted);
   const readyMs = performance.now() - restartAt;
   loadStartedAt = performance.now();
-  restarted.send({ channel: "cold-rows-ready" });
-  await Promise.race([
-    coldRowsReady.promise,
-    delay(10_000, undefined, { ref: false }).then(() => {
-      throw new Error("Cold row probe did not start");
-    }),
-  ]);
+  if (!values["from-listening"]) {
+    restarted.send({ channel: "cold-rows-ready" });
+    await Promise.race([
+      coldRowsReady.promise,
+      delay(10_000, undefined, { ref: false }).then(() => {
+        throw new Error("Cold row probe did not start");
+      }),
+    ]);
+  }
   const makeReadShapes = (clientSessionKey: string) => [
     ...(startupAdmission
       ? [
