@@ -123,9 +123,12 @@ export function resolveAvatarImageUrl(
   if (!trusted) {
     return unmanagedUrl;
   }
-  // Connected same-origin routes need the loader too: it resolves a missing
-  // avatar before Lit can reconcile an <img> error back over its initials.
-  return origin || authTokens.length ? loadIdentityAvatar(trusted) : trusted;
+  // Ambient same-origin authentication lets the browser reuse its HTTP image
+  // cache directly. Bearer credentials and cross-origin reads still need fetch.
+  if (!authTokens.length && (!origin || origin === globalThis.location?.origin)) {
+    return trusted;
+  }
+  return loadIdentityAvatar(trusted);
 }
 
 /** Acquire before awaiting: each pending or displayed consumer owns its own release. */

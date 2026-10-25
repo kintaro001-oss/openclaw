@@ -189,7 +189,7 @@ it("keeps both option routes and the selected avatar with token auth", async () 
       expect(avatarSrc(element)).toBe("blob:alpha");
       expect(element.querySelector('[value="beta"] img')?.getAttribute("src")).toBe("blob:beta");
     });
-    expect(avatar?.classList).toContain("is-pending");
+    expect(avatar?.classList).not.toContain("is-pending");
     avatar?.querySelector("img")?.dispatchEvent(new Event("load"));
     await waitForSolid(() => expect(avatar?.classList).not.toContain("is-pending"));
     element.accessibleLabel = "Choose an agent";
@@ -347,22 +347,12 @@ it.each(["fetch", "body"] as const)(
   },
 );
 
-it("fetches a local avatar image without a header when token auth is not active", async () => {
-  stubAvatarUrls("blob:unauthenticated-avatar");
-  const fetchMock = vi.fn().mockResolvedValue({
-    ok: true,
-    blob: async () => new Blob(["avatar"], { type: "image/png" }),
-  });
-  vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+it("leaves an ambient same-origin avatar in the browser image cache", async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
   const element = await createAvatarSelect();
-
-  await waitForFast(() =>
-    expect(fetchMock).toHaveBeenCalledWith(`${globalThis.location.origin}/avatar/alpha`, {
-      credentials: "include",
-      signal: expect.any(AbortSignal),
-    }),
-  );
-  await waitForFast(() => expect(avatarSrc(element)).toBe("blob:unauthenticated-avatar"));
+  expect(avatarSrc(element)).toBe(`${globalThis.location.origin}/avatar/alpha`);
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
 it("keeps avatar text out of typeahead and announces option metadata", async () => {

@@ -1,6 +1,7 @@
 import { createSignal, flush, Show } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
+import { setAvatarGatewayOrigin } from "../../lib/identity-avatar-context.ts";
 import type { AgentIdentity } from "../../lib/identity-avatar-view.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { IdentityAvatarImage, createIdentityAvatarPresentation } from "./identity-avatar-image.tsx";
@@ -27,6 +28,26 @@ function TestImage(props: { source: string | Promise<string | null> | null }) {
     </span>
   );
 }
+
+it("presents a known same-origin portrait without a decode-state transition", () => {
+  setAvatarGatewayOrigin(location.origin);
+  try {
+    const fetchAvatar = vi.spyOn(globalThis, "fetch");
+    const view = mountSolid(() => <Avatar agent={{ id: "forge", avatar: "/avatar/forge?v=1" }} />);
+    const frame = view.container.querySelector(".identity-avatar--agent")!;
+    const image = frame.querySelector("img")!;
+    expect(image.getAttribute("src")).toBe(`${location.origin}/avatar/forge?v=1`);
+    expect(frame.getAttribute("data-avatar-state")).toBe("loaded");
+    const mutations = observe(frame, { attributes: true, childList: true, subtree: true });
+    image.dispatchEvent(new Event("load"));
+    flush();
+    expect(mutations()).toHaveLength(0);
+    expect(fetchAvatar).not.toHaveBeenCalled();
+  } finally {
+    setAvatarGatewayOrigin(null);
+    vi.restoreAllMocks();
+  }
+});
 
 it("retains face nodes across same-ID publication", async () => {
   const [agent, publish] = createSignal<AgentIdentity>({ id: "forge", name: "Before" });

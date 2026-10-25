@@ -62,7 +62,7 @@ it.each([false, true])(
     const avatar = () => container.querySelector<HTMLElement>(".viewer-avatar")!;
     const image = container.querySelector("img")!;
     expect(image).not.toBeNull();
-    expect(avatar().classList.contains("is-pending")).toBe(true);
+    expect(avatar().classList.contains("is-pending")).toBe(authenticated);
     if (authenticated) {
       await waitForSolid(() => expect(image.getAttribute("src")).toBe("blob:solid-avatar"));
     }
@@ -77,7 +77,7 @@ it.each([false, true])(
     setUser((previous) => ({ ...previous!, avatarUrl: "/api/users/profile-ada/avatar?v=2" }));
     flush();
     expect(container.querySelector("img")).toBe(image);
-    expect(avatar().dataset.avatarState).toBe("pending");
+    expect(avatar().dataset.avatarState).toBe(authenticated ? "pending" : "loaded");
   },
 );
 

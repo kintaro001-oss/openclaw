@@ -17,7 +17,7 @@ type ImageOutcome = {
   state: "pending" | "loaded" | "failed";
 };
 
-/** Frames derive fallback presentation; the current image reports its own decoding outcome. */
+/** Known image URLs paint over their fallback without waiting for a decode event. */
 export function createIdentityAvatarPresentation(
   view: Accessor<IdentityAvatarImageProps["view"] & { pending: boolean }>,
 ) {
@@ -32,7 +32,9 @@ export function createIdentityAvatarPresentation(
       (current.source === value.imageUrl ||
         (typeof value.imageUrl === "string" && current.url === value.imageUrl))
       ? current.state
-      : "pending";
+      : typeof value.imageUrl === "string"
+        ? "loaded"
+        : "pending";
   });
   return {
     state,
@@ -72,25 +74,13 @@ export function IdentityAvatarImage(props: IdentityAvatarImageProps) {
         return;
       }
       if (!url || image.getAttribute("src") !== url) {
-        state(url ? "pending" : "failed", url);
+        state(url ? "loaded" : "failed", url);
         if (url) {
           image.setAttribute("src", url);
         } else {
           image.removeAttribute("src");
         }
       }
-      // Refs run before their wrapper is inserted; cached decodes emit no event.
-      queueMicrotask(() => {
-        if (
-          active &&
-          url &&
-          image.getAttribute("src") === url &&
-          image.complete &&
-          image.naturalWidth > 0
-        ) {
-          load();
-        }
-      });
     };
     if (typeof result === "string" || result === null) {
       apply(result);

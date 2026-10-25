@@ -10,6 +10,64 @@ const viewer = { type: "profile" as const, id: "alex" };
 const suite = createControlUiE2eSuite({ name: "User avatar alignment" });
 
 suite.define(() => {
+  it("keeps a known proxy-authenticated portrait in its final frame while it decodes", async () => {
+    await suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
+      const requests: Route[] = [];
+      await page.route("**/api/users/riley/avatar*", (route) => {
+        requests.push(route);
+      });
+      await installMockGateway(page, {
+        authMethod: "trusted-proxy",
+        authMode: "trusted-proxy",
+        omitConnectHelloAuth: true,
+        hasMultipleSessionSharingIdentities: true,
+        sessions: [{ key: "agent:main:main", visibility: "shared", sharingRole: "owner" }],
+        presenceUsers: [{ ...viewer, identity: viewer, self: true }],
+        historyMessages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "Review this portrait." }],
+            __openclaw: {
+              senderIdentity: { type: "profile", id: "riley" },
+              senderName: "Riley",
+              senderProfileAvatarUrl: "/api/users/riley/avatar?v=1",
+            },
+          },
+        ],
+      });
+      try {
+        await page.goto(`${suite.server.baseUrl}chat`, { waitUntil: "domcontentloaded" });
+        const slot = page.locator(".chat-group.user .chat-avatar-slot");
+        await slot.waitFor();
+        await page.screenshot({ path: `${suite.artifactDir}/known-portrait-pending.png` });
+        const before = await slot.evaluate((element) => ({
+          attributes: element.getAttributeNames().map((name) => [name, element.getAttribute(name)]),
+          bounds: element.getBoundingClientRect().toJSON(),
+        }));
+        const portrait = slot.locator("img");
+        expect(await portrait.getAttribute("src")).toBe(
+          new URL("/api/users/riley/avatar?v=1", suite.server.baseUrl).href,
+        );
+        expect(await slot.getAttribute("data-avatar-state")).toBe("loaded");
+        const image = await page.request.get(
+          new URL("apple-touch-icon.png", suite.server.baseUrl).href,
+        );
+        await Promise.all(requests.map((route) => route.fulfill({ response: image })));
+        await portrait.evaluate((element: HTMLImageElement) => element.decode());
+        expect(
+          await slot.evaluate((element) => ({
+            attributes: element
+              .getAttributeNames()
+              .map((name) => [name, element.getAttribute(name)]),
+            bounds: element.getBoundingClientRect().toJSON(),
+          })),
+        ).toEqual(before);
+      } finally {
+        await Promise.all(requests.map((route) => route.abort().catch(() => undefined)));
+      }
+    });
+  });
+
   it("keeps the painted avatar round while loading and preserves its size on failure", async () => {
     await suite.withPage({ viewport: { width: 1440, height: 900 } }, async ({ page }) => {
       const pending: Route[] = [];

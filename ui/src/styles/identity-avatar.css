@@ -38,14 +38,18 @@
   place-items: center;
 }
 
+.identity-avatar__image {
+  z-index: 1;
+}
+
 .identity-avatar__hat {
   position: absolute;
   inset: 0;
   pointer-events: none;
   grid-area: 1 / 1;
+  z-index: 2;
 }
 
-.identity-avatar--agent:not(.is-fallback) > .identity-avatar__image + .identity-avatar__fallback,
 .identity-avatar--agent.is-fallback > .identity-avatar__image,
 .identity-avatar--agent.is-pending > * {
   visibility: hidden;

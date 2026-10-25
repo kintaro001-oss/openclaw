@@ -57,6 +57,7 @@ type FixtureOptions = {
   sidebarListChurn?: boolean;
   sidebarLiveChurn?: boolean;
   sidebarAvatars?: boolean;
+  transcriptAvatars?: boolean;
   sidebarPersistentChildren?: boolean;
   sessionEventChurn?: boolean;
   sessionEventDurationMs?: number;
@@ -103,6 +104,17 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     },
   );
   const assets = new Map<string, FixtureAsset>(avatarAssets);
+  const transcriptSender = people[4]!;
+  if (options.transcriptAvatars) {
+    transcriptSender.avatarUrl = `/api/users/${transcriptSender.id}/avatar?v=${now}`;
+    profiles[4]!.hasAvatar = true;
+    profiles[4]!.avatarMime = "image/svg+xml";
+    assets.set(`/api/users/${transcriptSender.id}/avatar`, {
+      contentType: "image/svg+xml",
+      headers: { "Cache-Control": "private, max-age=31536000, immutable" },
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="teal"/></svg>',
+    });
+  }
   const { sessions, pinnedRows, pinnedKeys, selectedSessionKey, sidebarPersistentChildren } =
     createTeamScaleSessionInventory({
       now,
@@ -166,32 +178,16 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     now,
     selectedSessionKey,
   );
-  const { messageIds, historyMessages } = createTeamScaleHistoryFixture({
+  const { messageIds, historyMessages, configuredHistory } = createTeamScaleHistoryFixture({
     messageCount: counts.transcriptMessages,
     inlineWidgets: counts.inlineWidgets,
     now,
     largeSnapshot: options.largeSnapshot,
     attachments: duplicateReads?.attachments,
+    sender: options.transcriptAvatars ? transcriptSender : undefined,
+    historyStateReceipt: options.historyStateReceipt,
+    sessionInfo: pinnedRows[0]!,
   });
-  const configuredHistory =
-    options.largeSnapshot || options.historyStateReceipt
-      ? {
-          messages: historyMessages,
-          sessionId: pinnedRows[0]!.sessionId,
-          sessionInfo: pinnedRows[0]!,
-          hasMore: false,
-          totalMessages: counts.transcriptMessages,
-          metadata: { commands: [], models: [] },
-          ...(options.historyStateReceipt
-            ? {
-                stateRevision: {
-                  sessionInfo: "fixture-session-v1",
-                  commands: "fixture-commands-v1",
-                },
-              }
-            : {}),
-        }
-      : undefined;
   const catalogs: SessionCatalog[] = ["codex", "claude"].map((id, catalogIndex) => ({
     id,
     label: id === "codex" ? "Codex" : "Claude Code",
@@ -346,6 +342,9 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     awaitInitialRoster: false,
     authMethod: "trusted-proxy",
     authMode: "trusted-proxy",
+    ...(options.transcriptAvatars
+      ? { omitConnectHelloAuth: true, hasMultipleSessionSharingIdentities: true }
+      : {}),
     assistantAgentId: "main",
     assistantName: "Harbor",
     agentModel: "gpt-5-mini",
