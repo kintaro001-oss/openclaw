@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 269803,
-  "reason": "Desktop and Portals dependency isolation: same-host ce794 startup 270095 to 269803 gzip bytes; measured head value.",
+  "startupJsGzipBytes": 270103,
+  "reason": "Cross-route dependency isolation on d5503615074 removes unrelated route code while leaving Cron source unchanged; same-host final startup is 270103 B gzip, 122 B over base.",
   "updatedAt": "2026-10-25"
 }

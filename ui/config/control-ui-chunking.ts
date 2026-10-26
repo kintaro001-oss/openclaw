@@ -317,7 +317,7 @@ export function controlUiStableChunkName(id: string): string | undefined {
     case "ui/src/components/markdown-tokens.ts":
       return "markdown-streaming-runtime";
     case "ui/src/styles/session-panel-rail.css":
-      // Normal rail CSS shares the route sheet; the link reader imports its text.
+      // Keep normal rail CSS in Chat; other panels import its neutral inline text.
       return /[?&]inline(?:[=&]|$)/u.test(id) ? "deferred-ui-support" : undefined;
     case "ui/src/pages/chat/session-snapshot-database.ts":
       // Warm boot reads while the Gateway connects; the chat boot group made it wait for the whole route.
@@ -439,13 +439,11 @@ export function createControlUiCodeSplitting(options: { includeBootGroups?: bool
               );
               if (route === "shared") {
                 styles.add("ui/src/components/solid/text-overflow.css");
-                styles.add("ui/src/styles/session-panel-rail.css");
                 // Document styles also serve Agents without loading Chat's visible renderers.
                 styles.add("ui/src/styles/sidebar-markdown.css");
               }
               if (route === "chat") {
                 styles.delete("ui/src/components/solid/text-overflow.css");
-                styles.delete("ui/src/styles/session-panel-rail.css");
                 styles.delete("ui/src/styles/sidebar-markdown.css");
                 // These optional views share the route's preloaded stylesheet.
                 styles.add("ui/src/pages/chat/components/chat-pane-mobile-header.css");
