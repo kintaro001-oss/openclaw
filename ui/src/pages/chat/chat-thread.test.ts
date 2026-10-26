@@ -344,45 +344,35 @@ describe("collapseCompletedTurnWork", () => {
     timestamp,
   });
 
-  it.each([
-    {
-      name: "durable context event retains surrounding replies",
-      message: {
-        role: "custom",
-        customType: "openclaw.context-compaction",
-        content: "Context compacted",
-        display: true,
-        excludeFromContext: true,
-        details: { runId: "run-1" },
-        idempotencyKey: "codex-context-compaction:thread:turn:item",
-        timestamp: 2_000,
-      },
-      surrounding: true,
-      divider: { compaction: "complete", label: "Context compacted" },
-    },
-    {
-      name: "persisted boundary retains recorded token savings",
-      message: {
-        role: "system",
-        timestamp: 2_000,
-        __openclaw: {
-          kind: "compaction",
-          id: "checkpoint-with-metrics",
-          tokensBefore: 900_000,
-          tokensAfter: 24_700,
-        },
-      },
-      surrounding: false,
-      divider: { kind: "divider", label: "Context compacted", metric: "saved 875.3k tokens" },
-    },
-  ])("renders a compaction marker when $name", ({ message, surrounding, divider }) => {
+  it.each(["context event", "persisted boundary"])("renders a compaction %s", (source) => {
+    const boundary = source === "persisted boundary";
+    const marker = boundary
+      ? {
+          role: "system",
+          timestamp: 2_000,
+          __openclaw: {
+            kind: "compaction",
+            id: "checkpoint-with-metrics",
+            tokensBefore: 900_000,
+            tokensAfter: 24_700,
+          },
+        }
+      : chatMessage("custom", "Context compacted", 2_000, {
+          customType: "openclaw.context-compaction",
+          display: true,
+          excludeFromContext: true,
+          details: { runId: "run-1" },
+          idempotencyKey: "codex-context-compaction:thread:turn:item",
+        });
     const items = collapsedItems({
-      messages: surrounding
-        ? [user("do it", 1_000), message, assistant("All done.", 3_000)]
-        : [message],
+      messages: boundary ? [marker] : [user("do it", 1_000), marker, assistant("All done.", 3_000)],
     });
-    expect(items[surrounding ? 1 : 0]).toMatchObject(divider);
-    if (surrounding) {
+    expect(items[boundary ? 0 : 1]).toMatchObject(
+      boundary
+        ? { kind: "divider", label: "Context compacted", metric: "saved 875.3k tokens" }
+        : { compaction: "complete", label: "Context compacted" },
+    );
+    if (!boundary) {
       expectKinds(items, ["group", "divider", "group"]);
       expect(requireGroup(items[2]).messages[0]?.message).toMatchObject({ content: "All done." });
     }

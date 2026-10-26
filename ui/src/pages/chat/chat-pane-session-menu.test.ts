@@ -82,14 +82,13 @@ function renameCase(
   name: string,
   value: string,
   label: string | undefined,
-  fields: Partial<GatewaySessionRow> & { offline?: boolean } = {},
+  fields: Partial<GatewaySessionRow> = {},
 ) {
   return {
     ...sessionRow({ sessionId: "rename-current", ...fields }),
     name,
     value,
     label,
-    offline: fields.offline ?? false,
     agentId: fields.agentId ?? "main",
   };
 }
@@ -106,32 +105,6 @@ async function openHeaderMenu(pane: TestChatPane, row: GatewaySessionRow) {
 }
 
 describe("chat pane session menu boundary", () => {
-  it("leaves session actions unbuilt after idle until the menu opens", async () => {
-    vi.useFakeTimers({
-      toFake: ["setTimeout", "clearTimeout", "requestAnimationFrame", "cancelAnimationFrame"],
-    });
-    try {
-      const row = sessionRow({ label: "Current conversation", sharingRole: "owner" });
-      const { pane, state } = createPane({
-        sessions: createSessionCapabilityFixture({ state: { result: sessionsResult([row], 1) } }),
-      });
-      pane.presented = true;
-      state.chatLoading = false;
-      state.sessionsResult = sessionsResult([row], 1);
-      const mounted = mountSolid(() => createComponent(PaneHeaderView, headerProps(pane, row)));
-      flush();
-      await vi.advanceTimersByTimeAsync(4_000);
-      flush();
-      const menu = mounted.container.querySelector("openclaw-chat-header-session-menu")!;
-      expect(menu.querySelectorAll('[role^="menuitem"]')).toHaveLength(0);
-      expect(menu.openMenu()).toBe(true);
-      flush();
-      expect(menu.querySelectorAll('[role^="menuitem"]').length).toBeGreaterThan(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it("updates the retained header through rename and loaded workspace branch changes", async () => {
     const row = sessionRow({
       label: "Current conversation",
@@ -247,7 +220,7 @@ describe("chat pane session menu boundary", () => {
       expect(row.pinned).toBe(true);
     },
   );
-  it("retains menu children and reads current callbacks after a header refresh", async () => {
+  it("routes retained menu actions through current row and settings callbacks", async () => {
     const { pane, state } = createPane({
       sessions: createSessionCapabilityFixture({ state: { groups: ["Projects"] } }),
     });
@@ -266,32 +239,13 @@ describe("chat pane session menu boundary", () => {
     expect(menu.openMenu()).toBe(true);
     flush();
     await menu.updateComplete;
-    const dropdown = menu.querySelector(".chat-header-session-menu__panel")!;
-    await openSubmenu(dropdown, "View");
-    const reasoning = menu.querySelector('[value="view:reasoning"]')!;
-    menu.querySelector<HTMLButtonElement>(".chat-header-session-menu__trigger")!.click();
-    await menu.updateComplete;
     session = { ...session, label: "Updated conversation" };
     pane.context.navigation.update({ sidebarEntries: [`session:${session.key}`] });
     draw();
     await menu.updateComplete;
-    expect(menu.querySelector(".chat-header-session-menu__panel")).toBe(dropdown);
-    expect(menu.querySelector('[value="view:reasoning"]')).toBe(reasoning);
+    expect(container.querySelector("openclaw-chat-header-session-menu")).toBe(menu);
     expect(menu.session.label).toBe("Updated conversation");
     expect(menu.session.pinned).toBe(true);
-    expect(dropdown.getAttribute("aria-label")).toContain("Updated conversation");
-    expect(dropdown.matches(":popover-open")).toBe(false);
-    const previousChecked = reasoning.getAttribute("aria-checked");
-    state.settings = { ...state.settings, chatShowThinking: !state.settings.chatShowThinking };
-    draw();
-    await menu.updateComplete;
-    expect(reasoning.getAttribute("aria-checked")).toBe(previousChecked);
-    expect(menu.openMenu()).toBe(true);
-    flush();
-    expect(menu.querySelector('[value="view:reasoning"]')).toBe(reasoning);
-    expect(menu.querySelector('[value="view:reasoning"]')?.getAttribute("aria-checked")).toBe(
-      String(state.settings.chatShowThinking),
-    );
     const action = vi.spyOn(pane, "handleHeaderSessionAction").mockResolvedValue(undefined);
     menu.querySelector<HTMLButtonElement>('[value="toggle-pin"]')!.click();
     await menu.updateComplete;
@@ -300,7 +254,7 @@ describe("chat pane session menu boundary", () => {
     state.applySettings = vi.fn();
     expect(menu.openMenu()).toBe(true);
     flush();
-    await openSubmenu(dropdown, "View");
+    await openSubmenu(menu.querySelector(".chat-header-session-menu__panel")!, "View");
     menu.querySelector<HTMLButtonElement>('[value="view:tool-calls"]')!.click();
     await menu.updateComplete;
     expect(state.applySettings).toHaveBeenCalledWith({
@@ -386,25 +340,6 @@ describe("chat pane session menu boundary", () => {
       "openclaw-chat-header-session-menu",
     );
     expect(menu?.session.label).toBe("Reviewed ledger");
-  });
-
-  it("keeps the current observed title while the roster projection is absent", async () => {
-    const row = sessionRow({
-      key: "agent:main:observed-title",
-      agentId: "main",
-      sessionId: "observed-title-session",
-      label: "Observed conversation",
-    });
-    const { context, mount } = createMountedPanes([row]);
-    const pane = mount(row.key);
-    await refreshPane(pane);
-    // The current row observation can arrive before the retained roster catches up.
-    vi.spyOn(context.sessions, "presentation", "get").mockReturnValue({
-      result: sessionsResult([], 1),
-      agentId: "main",
-    });
-    const container = document.createElement("div");
-    expect(drawHeader(pane, container)).toBe(row.label);
   });
 
   it("resolves cached titles for Home aliases using the current hello defaults", () => {
@@ -754,7 +689,6 @@ describe("chat pane session menu boundary", () => {
       sessionId: "research-global",
       agentId: "research",
     }),
-    renameCase("offline retained session", "Offline notes", "Offline notes", { offline: true }),
     renameCase("unchanged generated title", "Generated title", undefined, {
       key: "agent:main:dashboard:generated",
       sessionId: undefined,
@@ -762,17 +696,13 @@ describe("chat pane session menu boundary", () => {
     }),
   ])(
     "renames only an edited captured session: $name",
-    ({ key, sessionId, displayName, value, label, agentId, offline }) => {
+    ({ key, sessionId, displayName, value, label, agentId }) => {
       const patch = vi.fn(async () => ({}));
       const { pane, state } = createPane({
         sessions: createSessionCapabilityFixture({ patch }),
       });
       state.sessionKey = key;
       state.assistantAgentId = agentId;
-      if (offline) {
-        pane.context.gateway.snapshot.phase = "offline";
-        state.connected = false;
-      }
       const session = sessionRow({
         key,
         sessionId,

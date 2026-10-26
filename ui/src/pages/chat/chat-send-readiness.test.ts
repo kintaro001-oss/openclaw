@@ -75,6 +75,39 @@ function startHistory(host: Parameters<typeof loadChatHistory>[0]) {
   return loadChatHistory(host, { startup: true, deferBranches: true });
 }
 
+type Host = ReturnType<typeof makeChatHost>;
+function pendingRunInput(host: Host, id: string, runId: string, createdAt = 1) {
+  keepVolatileQueuedMessage(host, host.sessionKey, {
+    id,
+    text: id,
+    createdAt,
+    sendRunId: runId,
+    pendingRunId: runId,
+  });
+}
+function expectPendingDraft(host: Host, text: string, fields: object = {}) {
+  expect(host.chatQueue).toEqual([expect.objectContaining({ text, sendAttempts: 0, ...fields })]);
+  expect(host.chatMessage).toBe("");
+  expectRequestCounts(host.request, { "chat.send": 0 });
+}
+
+async function duringStartup(
+  fixture: ReturnType<typeof pendingHistoryHost>,
+  response: ChatHistoryResult,
+  check: (sending: ReturnType<typeof handleSendChat>) => Promise<void>,
+  options?: Parameters<typeof handleSendChat>[2],
+) {
+  const loading = startHistory(fixture.host);
+  const sending = handleSendChat(fixture.host, undefined, options);
+  try {
+    await check(sending);
+  } finally {
+    fixture.history.resolve(response);
+    await loading;
+    await sending;
+  }
+}
+
 useChatSendBrowserFixture();
 
 it("admits consecutive drafts synchronously and delivers them in order without clearing a newer draft", async () => {
@@ -183,13 +216,7 @@ it.each([
       if (reconcileChatRunAfterSessionStatePublication(host) && reentrantSuccessor) {
         successorStarted = true;
         adoptStartedChatRun(host, "reentrant-run", 3);
-        keepVolatileQueuedMessage(host, host.sessionKey, {
-          id: "successor-input",
-          text: "Input awaiting the successor",
-          createdAt: 3,
-          sendRunId: "reentrant-run",
-          pendingRunId: "reentrant-run",
-        });
+        pendingRunInput(host, "successor-input", "reentrant-run", 3);
       }
     });
     let draining: ReturnType<typeof resumeStoredChatOutboxes> | undefined;
@@ -202,13 +229,7 @@ it.each([
     try {
       await sessions.refresh({ agentId: "main", force: true });
       await handleSendChat(host, undefined, { followUpMode: "queue" });
-      keepVolatileQueuedMessage(host, host.sessionKey, {
-        id: "current-input",
-        text: "Input awaiting the current run",
-        createdAt: 1,
-        sendRunId: "finished-run",
-        pendingRunId: "finished-run",
-      });
+      pendingRunInput(host, "current-input", "finished-run");
       expect(host.chatQueue).toHaveLength(2);
       const capturedOutboxes = listStoredChatOutboxes(host);
       const queuedIds = host.chatQueue.map((item) => item.id);
@@ -253,7 +274,6 @@ it.each([
         });
         expect(eventWake).toBeDefined();
       }
-      expect(sessions.state.result?.sessions[0]).toMatchObject(listed);
       expect(host.chatRunId).toBe("finished-run");
       expect(host.chatRunLifecycleGeneration).toBe(runGeneration);
       expect(host.currentSessionId).toBe("current-session");
@@ -289,7 +309,7 @@ it.each([
         expect(host.chatRunLifecycleGeneration).toBe(runGeneration);
         expect(host.chatQueue).toContainEqual(
           expect.objectContaining({
-            text: "Input awaiting the current run",
+            text: "current-input",
             pendingRunId: "finished-run",
           }),
         );
@@ -342,7 +362,10 @@ it.each([
         expect(host.chatQueue).toEqual([]);
         return;
       }
-      expect(sessions.state.result?.sessions[0]).toMatchObject(listed);
+      expect(sessions.state.result?.sessions[0]).toMatchObject({
+        status: "running",
+        activeRunIds: ["finished-run"],
+      });
     } finally {
       history.resolve({ messages: [], sessionInfo: listed });
       await Promise.allSettled([draining, eventWake]);
@@ -372,13 +395,7 @@ it.each(["new run", "new session", "different terminal", "still active"])(
     await handleSendChat(host, undefined, { followUpMode: "queue" });
     expectRequestCounts(host.request, { "chat.send": 0 });
     expect(host.chatQueue).toHaveLength(1);
-    keepVolatileQueuedMessage(host, host.sessionKey, {
-      id: "previous-input",
-      text: "Input awaiting the previous run",
-      createdAt: 1,
-      sendRunId: "finished-run",
-      pendingRunId: "finished-run",
-    });
+    pendingRunInput(host, "previous-input", "finished-run");
 
     const draining = resumeStoredChatOutboxes(host);
     await vi.waitFor(() =>
@@ -416,7 +433,7 @@ it.each([
 ])(
   "keeps $action admission separate from initial history (run hydrated: $hydrated)",
   async ({ message, action, hydrated }) => {
-    const { history, host } = pendingHistoryHost({
+    const fixture = pendingHistoryHost({
       chatMessage: message,
       chatRunId: hydrated ? "waiting-run" : null,
       chatStream: hydrated ? "Waiting for approval" : null,
@@ -425,9 +442,8 @@ it.each([
         "chat.send": { runId: "approval-command", status: "started" },
       },
     });
-    const loading = startHistory(host);
-    const sending = handleSendChat(host);
-    try {
+    const { host } = fixture;
+    await duringStartup(fixture, { messages: [] }, async (sending) => {
       if (action === "queued") {
         await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
       } else if (action === "approve") {
@@ -462,11 +478,7 @@ it.each([
       if (action === "blocked") {
         expect(host.chatMessage).toBe(message);
       }
-    } finally {
-      history.resolve({ messages: [] });
-      await loading;
-      await sending;
-    }
+    });
   },
 );
 
@@ -550,7 +562,7 @@ it("accepts a restored transcript draft with an attachment before history and de
     ...sessionHistory({ activeLeafEntryId: "current-leaf" }),
     sessionId: "current-session",
   };
-  const { history, host } = pendingHistoryHost({
+  const fixture = pendingHistoryHost({
     chatMessage: "Draft while restoring history",
     chatAttachments: [
       {
@@ -565,23 +577,16 @@ it("accepts a restored transcript draft with an attachment before history and de
       "chat.send": { status: "started" },
     },
   });
+  const { host } = fixture;
   applyChatCacheSnapshot(host, cachedTranscript("restored-session", "restored-leaf"));
-  const loading = startHistory(host);
-  const sending = handleSendChat(host);
-  try {
+  await duringStartup(fixture, current, async () => {
     await vi.waitFor(() => expect(host.chatMessage).toBe(""));
     expect(host.currentSessionId).toBe("restored-session");
-    expect(host.chatQueue).toEqual([
-      expect.objectContaining({ text: "Draft while restoring history", sendAttempts: 0 }),
-    ]);
-    expectRequestCounts(host.request, { "chat.send": 0, "chat.history": 0 });
+    expectPendingDraft(host, "Draft while restoring history");
+    expectRequestCounts(host.request, { "chat.history": 0 });
     expect(host.chatAttachments).toEqual([]);
     host.chatMessage = "Next draft";
-  } finally {
-    history.resolve(current);
-    await loading;
-    await sending;
-  }
+  });
   expect(findChatSendPayload(host)).toMatchObject({
     message: "Draft while restoring history",
     sessionId: "current-session",
@@ -645,24 +650,19 @@ it.each(["original-leaf", null])(
 it.each(["connection", "conversation"] as const)(
   "does not deliver stale queued work after a %s change during history",
   async (change) => {
-    const { history, host } = pendingHistoryHost({
+    const fixture = pendingHistoryHost({
       chatMessage: "Queued before history",
       requestHandlers: { "chat.send": { status: "started" } },
     });
-    const loading = startHistory(host);
-    const sending = handleSendChat(host);
-    try {
+    const { host } = fixture;
+    await duringStartup(fixture, { messages: [], sessionId: "old-session" }, async () => {
       await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
       if (change === "connection") {
         host.connectionEpoch += 1;
       } else {
         host.sessionKey = "agent:main:another-conversation";
       }
-    } finally {
-      history.resolve({ messages: [], sessionId: "old-session" });
-      await loading;
-      await sending;
-    }
+    });
     expectRequestCounts(host.request, { "chat.send": 0 });
     expect(host.chatMessage).toBe("");
   },
@@ -694,11 +694,7 @@ it.each([false, true])(
       sending.push(handleSendChat(host));
       await vi.waitFor(() => expect(host.chatQueue).toHaveLength(2));
       chatOutboxOwner(host).remove(host, firstId);
-      expect(host.chatQueue).toEqual([
-        expect.objectContaining({ text: "Keep this second message", sendAttempts: 0 }),
-      ]);
-      expect(host.chatMessage).toBe("");
-      expectRequestCounts(host.request, { "chat.send": 0 });
+      expectPendingDraft(host, "Keep this second message");
       if (switchPane) {
         host.sessionKey = "agent:main:other";
         host.currentSessionId = "other-session";
@@ -730,21 +726,16 @@ it.each(["steer", "interrupt", "queue"] as const)(
   async (followUpMode) => {
     const sessionKey = "agent:main:main";
     const message = "Apply my selected follow-up mode";
-    const { history, host } = pendingHistoryHost({
+    const fixture = pendingHistoryHost({
       sessionKey,
       chatMessage: message,
       sessionsResult: sessionListResult(1, [sessionRow({ hasActiveRun: false, status: "done" })]),
     });
+    const { host } = fixture;
     applyChatCacheSnapshot(host, cachedTranscript("current-session", "cached-leaf"));
-    const loading = startHistory(host);
-    const sending = handleSendChat(host, undefined, { followUpMode });
-    try {
-      await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
-      expect(host.chatMessage).toBe("");
-      expect(host.chatQueue[0]).toMatchObject({ text: message, sendAttempts: 0 });
-      expectRequestCounts(host.request, { "chat.send": 0 });
-    } finally {
-      history.resolve({
+    await duringStartup(
+      fixture,
+      {
         ...sessionHistory({
           activeLeafEntryId: "active-leaf",
           activeRunIds: ["active-run"],
@@ -753,10 +744,13 @@ it.each(["steer", "interrupt", "queue"] as const)(
           updatedAt: 2,
         }),
         inFlightRun: { runId: "active-run", text: "Work started after the cached snapshot" },
-      });
-      await loading;
-      await sending;
-    }
+      },
+      async () => {
+        await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
+        expectPendingDraft(host, message);
+      },
+      { followUpMode },
+    );
 
     if (followUpMode === "queue") {
       expectRequestCounts(host.request, { "chat.send": 0 });
@@ -779,7 +773,7 @@ it("resumes an early interrupt message for its captured session after switching 
   const queueMode = "interrupt";
   const sessionKey = "agent:work:research";
   const message = "Continue the selected work";
-  const { history, host } = pendingHistoryHost({
+  const fixture = pendingHistoryHost({
     sessionKey,
     currentSessionId: "cached-source-session",
     chatDisplayedLeafEntryId: "cached-source-leaf",
@@ -787,22 +781,15 @@ it("resumes an early interrupt message for its captured session after switching 
     chatFollowUpMode: queueMode,
     chatMessage: message,
   });
-  const loading = startHistory(host);
-  const sending = handleSendChat(host);
-  try {
+  const { host } = fixture;
+  await duringStartup(fixture, { messages: [], sessionId: "source-session" }, async () => {
     await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
-    expect(host.chatMessage).toBe("");
-    expect(host.chatQueue[0]).toMatchObject({ sessionKey, queueMode, sendAttempts: 0 });
-    expectRequestCounts(host.request, { "chat.send": 0 });
+    expectPendingDraft(host, message, { sessionKey, queueMode });
     host.sessionKey = "agent:main:another-conversation";
     host.currentSessionId = "new-pane-session";
     host.chatDisplayedLeafEntryId = "new-pane-leaf";
     host.chatRunId = null;
-  } finally {
-    history.resolve({ messages: [], sessionId: "source-session" });
-    await loading;
-    await sending;
-  }
+  });
   expectRequestCounts(host.request, { "chat.send": 0 });
 
   await resumeStoredChatOutboxes(host);

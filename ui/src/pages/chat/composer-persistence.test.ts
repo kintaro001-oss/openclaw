@@ -120,6 +120,12 @@ function heldItem(state: ComposerState, fields: Partial<ChatQueueItem> = {}): Ch
 }
 const privateMentions = [{ profileId: "alex", start: 0, end: 5 }];
 const privateGoal = { action: "start" as const, sessionId: "private-session" };
+const privateInput = {
+  chatMessage: "@Alex private objective",
+  chatMentions: privateMentions,
+  chatGoalDraftMode: privateGoal,
+  chatReplyTarget: { messageId: "private-reply", text: "Private quote" },
+};
 const failedAttachment = {
   sendState: "failed" as const,
   sendError: "RangeError: Maximum call stack size exceeded",
@@ -507,39 +513,33 @@ it("reviews full v1 main and global queues while consuming legacy tombstones", (
 });
 
 it.each([
-  ["sending", "waiting-reconnect", undefined, undefined],
+  [{ sendState: "sending" }, { sendState: "waiting-reconnect" }],
   [
-    "executing-command",
-    "failed",
-    undefined,
-    "Command was interrupted. Review the conversation before retrying.",
+    { sendState: "executing-command" },
+    {
+      sendState: "failed",
+      sendError: "Command was interrupted. Review the conversation before retrying.",
+    },
   ],
   [
-    "waiting-model",
-    "failed",
-    "previous attempt failed",
-    "Chat settings update was interrupted. Review and retry when ready.",
+    { sendState: "waiting-model", sendError: "previous attempt failed" },
+    {
+      sendState: "failed",
+      sendError: "Chat settings update was interrupted. Review and retry when ready.",
+    },
   ],
-] as const)(
-  "normalizes %s before durable replay",
-  (sendState, restoredState, sendError, restoredError) => {
+  [failedAttachment, failedAttachment],
+] satisfies [Partial<ChatQueueItem>, Partial<ChatQueueItem>][])(
+  "roundtrips persisted send state %#",
+  (input, restored) => {
     const state = createState();
     const item: ChatQueueItem = {
       ...reconnectItem("interrupted", 1),
-      sendState,
-      ...(sendError ? { sendError } : {}),
+      ...input,
     };
     expect(admitItem(state, item)).toBe(true);
     expect(snapshot(state)?.queue).toEqual(
-      outbox(
-        {
-          ...item,
-          sendState: restoredState,
-          ...(restoredError ? { sendError: restoredError } : {}),
-        },
-        state.sessionKey,
-        "lily",
-      ).queue,
+      outbox({ ...item, ...restored }, state.sessionKey, "lily").queue,
     );
   },
 );
@@ -733,29 +733,13 @@ it("retries a failed draft write when stopping", () => {
   expect(snapshot(state)?.draft).toBe("retry this write");
 });
 
-it("keeps failed attachment sends durable and retryable, including stack-overflow failures", () => {
-  const state = createState();
-  const failed: ChatQueueItem = {
-    id: "overflow-attachment",
-    text: "failed attachment send",
-    createdAt: 1,
-    ...failedAttachment,
-  };
-
-  expect(admitItem(state, failed)).toBe(true);
-  expect(snapshot(state)?.queue).toMatchObject([failed]);
-});
-
 it.each(["canonical key", "arriving metadata"] as const)(
   "retires %s private storage, preserving live input and queues",
   (source) => {
     const state = createState({
       sessionKey:
         source === "canonical key" ? "agent:lily:dashboard:incognito-private" : "agent:lily:main",
-      chatMessage: "@Alex private objective",
-      chatMentions: privateMentions,
-      chatGoalDraftMode: privateGoal,
-      chatReplyTarget: { messageId: "private-reply", text: "Private quote" },
+      ...privateInput,
     });
     const queued = heldItem(state);
     if (source === "arriving metadata") {
@@ -787,11 +771,7 @@ it.each(["canonical key", "arriving metadata"] as const)(
       Array(4).fill(undefined),
     );
     expect(restore(state)).toBe(true);
-    expect(state).toMatchObject({
-      chatMessage: "@Alex private objective",
-      chatMentions: [expect.anything()],
-      chatGoalDraftMode: { action: "start" },
-    });
+    expect(state).toMatchObject(privateInput);
     reloadStorage(state);
     const restored = createState({ sessionKey: state.sessionKey });
     expect(restore(restored)).toBe(true);

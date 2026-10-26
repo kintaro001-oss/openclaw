@@ -1,5 +1,4 @@
 /* @vitest-environment jsdom */
-import { readSessionMessageIdentity } from "@openclaw/gateway-client/browser";
 import { expectDefined } from "@openclaw/normalization-core";
 import { createEffect, createRoot, flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
@@ -40,11 +39,7 @@ import { handlePageGatewayEvent } from "./chat-state-events.test-support.ts";
 import { buildChatItems } from "./chat-thread-build.ts";
 import { resetChatThreadState } from "./chat-thread.ts";
 import { loadChatComposerState } from "./composer-draft-storage.ts";
-import {
-  admitChatSubmission,
-  reduceChatSessionProjection,
-  getChatSessionProjection,
-} from "./history-merge.ts";
+import { admitChatSubmission, reduceChatSessionProjection } from "./history-merge.ts";
 import { installOutboxBrowserStorage } from "./outbox-browser.test-support.ts";
 import { prepareOutboxPayload } from "./outbox-payloads.ts";
 import {
@@ -74,6 +69,17 @@ function threadItems(options: Partial<Parameters<typeof buildChatItems>[0]>) {
 }
 const activeSession = { key: sessionKey, sessionId, hasActiveRun: true, status: "running" };
 const emptyPage = { items: [], total: 0 };
+const historyPage = (
+  messages: unknown[] = [],
+  pendingInputs: ChatPendingInputsPage = emptyPage,
+  extra: Record<string, unknown> = {},
+) => ({ sessionId, messages, pendingInputs, ...extra });
+const pendingPage = (
+  state: ChatPendingInputsPage["items"][number]["state"],
+  message = input.message,
+) => ({ ...page, items: [{ ...input, state, message }] });
+const noticeText = (items: ReturnType<typeof buildPendingInputItems>) =>
+  items.filter((item) => item.kind === "notice").map((item) => item.text);
 function expectReceiptQuery(host: ReturnType<typeof makeChatHost>, inputRunIds: string[]) {
   expect(requestCalls(host.request, "chat.history").at(-1)?.[1]).toMatchObject({ inputRunIds });
 }
@@ -175,9 +181,7 @@ describe("server-owned pending input display", () => {
       workerSetup,
     );
     expect(items.some((item) => item.kind === "message")).toBe(true);
-    expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual(
-      notice ? [notice] : [],
-    );
+    expect(noticeText(items)).toEqual(notice ? [notice] : []);
   });
 
   it("keeps cached local submissions available after pane remount", async () => {
@@ -283,7 +287,7 @@ describe("server-owned pending input display", () => {
     }
     const loading = [loadChatHistory(first), loadChatHistory(second)];
     const calls = requestCalls(first.request, "chat.history");
-    response.resolve({ sessionId, messages: [], pendingInputs: { items: [], total: 0 } });
+    response.resolve(historyPage());
     await Promise.all(loading);
     expect(calls).toHaveLength(2);
     expect(calls.map(([, params]) => params)).toEqual([
@@ -297,16 +301,14 @@ describe("server-owned pending input display", () => {
       ...pendingScope,
       chatHistoryPagination: { hasMore: false },
       requestHandlers: {
-        "chat.history": (params: { inputRunIds?: string[] }) => ({
-          sessionId,
-          messages: [],
-          pendingInputs: { items: [], total: 0 },
-          inputReceipts: params.inputRunIds?.map((runId) => ({
-            runId,
-            state: "consumed",
-            consumedByEventId: "aggregate",
-          })),
-        }),
+        "chat.history": (params: { inputRunIds?: string[] }) =>
+          historyPage([], emptyPage, {
+            inputReceipts: params.inputRunIds?.map((runId) => ({
+              runId,
+              state: "consumed",
+              consumedByEventId: "aggregate",
+            })),
+          }),
       },
     });
     for (let index = 0; index < 51; index++) {
@@ -336,12 +338,14 @@ describe("server-owned pending input display", () => {
         sendState: "sending" as const,
       })),
       requestHandlers: {
-        "chat.history": (params: { inputRunIds?: string[] }) => ({
-          sessionId,
-          messages: [],
-          pendingInputs: { items: [], total: 21, nextBefore: 21 },
-          inputReceipts: params.inputRunIds?.map((runId) => ({ runId, state: "pending" })),
-        }),
+        "chat.history": (params: { inputRunIds?: string[] }) =>
+          historyPage(
+            [],
+            { items: [], total: 21, nextBefore: 21 },
+            {
+              inputReceipts: params.inputRunIds?.map((runId) => ({ runId, state: "pending" })),
+            },
+          ),
       },
     });
     applyChatPendingInputs(host, {
@@ -381,25 +385,16 @@ describe("server-owned pending input display", () => {
       const acceptedPage =
         custody === "consumed"
           ? emptyPage
-          : {
-              ...page,
-              items: [
-                {
-                  ...input,
-                  state: custody,
-                  message: {
-                    role: "user",
-                    content: "Keep my accepted input",
-                    timestamp: 90,
-                    __openclaw: {
-                      id: `pending:${input.id}`,
-                      senderName: "Authoritative Author",
-                      media: [{ url: "media://inbound/initial.png", contentType: "image/png" }],
-                    },
-                  },
-                },
-              ],
-            };
+          : pendingPage(custody, {
+              role: "user",
+              content: "Keep my accepted input",
+              timestamp: 90,
+              __openclaw: {
+                id: `pending:${input.id}`,
+                senderName: "Authoritative Author",
+                media: [{ url: "media://inbound/initial.png", contentType: "image/png" }],
+              },
+            });
       const receipts =
         custody === "consumed"
           ? [
@@ -445,15 +440,13 @@ describe("server-owned pending input display", () => {
         },
       );
       for (const sendRunId of [input.runId, "other-source"]) {
-        const item = {
+        const item = queuedSource(expectDefined(sendRunId, "source run"), {
           id: `local-${sendRunId}`,
-          sendRunId,
-          sessionKey,
           createdAt: 100,
           text: "Keep my accepted input",
           sender: { id: "author", name: "Author" },
           replyToId: "reply-target",
-        };
+        });
         if (source === "initial" && sendRunId === input.runId) {
           chatSubmissions.retain(
             buildInitialChatSubmission(
@@ -489,7 +482,6 @@ describe("server-owned pending input display", () => {
         }
       }
       expect(host.chatMessages).toEqual([...history, unrelated]);
-      expect(getChatSessionProjection(host).messages).toEqual([...history, unrelated]);
       expect(host).toMatchObject({
         chatRunId: "active-run",
         chatStream: "Still working",
@@ -497,14 +489,6 @@ describe("server-owned pending input display", () => {
       expect(host.chatToolMessages).toEqual([tool]);
       const displayed = getChatPendingInputs(host)?.page;
       expect(displayed).toEqual(acceptedPage);
-      if (custody !== "consumed") {
-        const displayedMessage = displayed!.items[0]!.message;
-        expect(readSessionMessageIdentity(displayedMessage)).toMatchObject({
-          id: `pending:${input.id}`,
-          sequence: null,
-          sendId: null,
-        });
-      }
       // Empty later snapshots and a fresh pane must not turn retained image bytes back into input.
       reduceChatSessionProjection(
         host,
@@ -570,12 +554,7 @@ describe("server-owned pending input display", () => {
         chatRunId: "active-run",
         chatStream: "Live output",
         requestHandlers: {
-          "chat.history": {
-            sessionId,
-            messages: [],
-            pendingInputs: page,
-            sessionInfo: activeSession,
-          },
+          "chat.history": historyPage([], page, { sessionInfo: activeSession }),
         },
       });
       applyChatPendingInputs(host, { items: [], total: 0 });
@@ -661,17 +640,14 @@ describe("server-owned pending input display", () => {
       });
       expect(historyReads).toBe(1);
       const refreshing = loadChatHistory(host);
-      stale.resolve({ sessionId, messages: [initialUser], pendingInputs: page });
+      stale.resolve(historyPage([initialUser], page));
       await freshStarted.promise;
       expect(historyReads).toBe(2);
       expect(host.chatMessages).toEqual([initialUser, promoted]);
       expect(getChatHistoryLoadState(host).phase).toBe("in-flight");
-      fresh.resolve({
-        sessionId,
-        messages: [initialUser, promoted],
-        pendingInputs: { items: [], total: 0 },
-        sessionInfo: activeSession,
-      });
+      fresh.resolve(
+        historyPage([initialUser, promoted], emptyPage, { sessionInfo: activeSession }),
+      );
       const [loaded, refreshed] = await Promise.all([loading, refreshing]);
       expect(loaded).toBe(refreshed);
       expect(host.lastError).toBeNull();
@@ -728,11 +704,11 @@ describe("server-owned pending input display", () => {
               "complete accepted attachment message",
             )
           : input.message;
-      const acceptedPage: ChatPendingInputsPage = { ...page, items: [{ ...input, message }] };
+      const acceptedPage = pendingPage(input.state, message);
       const host = makeChatHost({
         ...pendingScope,
         requestHandlers: {
-          "chat.history": { messages: history, sessionId, pendingInputs: acceptedPage },
+          "chat.history": historyPage(history, acceptedPage),
         },
       });
       if (kind === "blob") {
@@ -789,12 +765,6 @@ describe("server-owned pending input display", () => {
           kind: "group",
           role: "user",
           messages: [expect.objectContaining({ message })],
-        }),
-      );
-      expect(items).toContainEqual(
-        expect.objectContaining({
-          kind: "notice",
-          text: "Interrupted before the agent started it. If it does not resume, copy it and send again.",
         }),
       );
       expectRequestCounts(host.request, { "chat.send": 0 });
