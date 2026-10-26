@@ -80,7 +80,10 @@ const pendingPage = (
 ) => ({ ...page, items: [{ ...input, state, message }] });
 const noticeText = (items: ReturnType<typeof buildPendingInputItems>) =>
   items.filter((item) => item.kind === "notice").map((item) => item.text);
-function expectReceiptQuery(host: ReturnType<typeof makeChatHost>, inputRunIds: string[]) {
+function expectReceiptQuery(
+  host: { request: Parameters<typeof requestCalls>[0] },
+  inputRunIds: string[],
+) {
   expect(requestCalls(host.request, "chat.history").at(-1)?.[1]).toMatchObject({ inputRunIds });
 }
 

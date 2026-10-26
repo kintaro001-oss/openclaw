@@ -74,6 +74,9 @@ it("parses gateway models with correct pricing conversion", async () => {
       policy: { allowedHostnames: ["api.kilo.ai"] },
     }),
   );
+  const timeoutMs = fetchWithSsrFGuardMock.mock.calls[0]?.[0]?.timeoutMs;
+  expect(timeoutMs).toBeGreaterThan(0);
+  expect(timeoutMs).toBeLessThanOrEqual(5000);
   expect(models).toHaveLength(2);
 
   expect(modelById(models, "chat")).toMatchObject({

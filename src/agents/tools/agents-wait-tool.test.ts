@@ -2,7 +2,12 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { typeCheckSources } from "../../../test/helpers/typescript.js";
+import { projectAgentHistoryActivity } from "../../infra/agent-activity-events.js";
 import { recoverStuckDiagnosticSession } from "../../logging/diagnostic-stuck-session-recovery.runtime.js";
+import {
+  createNestedToolActivity,
+  readNestedToolActivity,
+} from "../../sessions/nested-tool-activity.js";
 import {
   captureSessionControllerStop,
   stopSession,
@@ -53,7 +58,7 @@ vi.mock("../subagents/registry/subagent-registry-publication.js", async (importO
 });
 
 import { isToolResultError } from "../tool-result-error.js";
-import { createAgentsWaitTool } from "./agents-wait-tool.js";
+import { createAgentsWaitTool, waitForCollectorCompletion } from "./agents-wait-tool.js";
 import {
   collectorRun,
   createMainSessionWaitTool,
@@ -90,15 +95,19 @@ function addRun(
   return entry;
 }
 
-function startWait(runId: string, timeoutSeconds = 1) {
+function startWait(runId: string, timeoutSeconds = 1, boundary: "tool" | "bridge" = "tool") {
   const controller = new AbortController();
   const state: { result?: unknown } = {};
-  const waiting = executeWait([runId], timeoutSeconds, controller.signal).then(
-    ({ details: value }) => {
-      state.result = value;
-      return value;
-    },
-  );
+  const waiting = (
+    boundary === "tool"
+      ? createMainSessionWaitTool()
+          .execute("wait", { ids: [runId], timeoutSeconds }, controller.signal)
+          .then((value) => value.details)
+      : waitAtBoundary(boundary, runId, controller.signal)
+  ).then((value) => {
+    state.result = value;
+    return value;
+  });
   const observed = observe(waiting);
   onTestFinished(async () => {
     controller.abort();
@@ -159,6 +168,12 @@ function publishChanges(count = 1) {
 
 function notOwner(runId: string) {
   return { completed: [], pending: [], errors: [{ runId, error: "not_owner" }], success: false };
+}
+
+function deniedAtBoundary(boundary: "tool" | "bridge", runId: string) {
+  return boundary === "tool"
+    ? { value: notOwner(runId) }
+    : { error: expect.objectContaining({ message: `agents.run not_owner: ${runId}` }) };
 }
 
 describe("agents_wait", () => {
@@ -237,6 +252,7 @@ describe("agents_wait", () => {
 
   it.each([
     ["bridge", "before"],
+    ["bridge", "registration"],
     ["tool", "before"],
     ["tool", "during"],
     ["tool", "registration"],
@@ -274,23 +290,13 @@ describe("agents_wait", () => {
     expect(registryEvents.listeners.size).toBe(0);
   });
 
-  it.each([false, true])("maps bridge completion with foreign=%s", async (foreign) => {
-    addRun("bridge", { status: "done" }, {}, foreign ? "agent:other:main" : MAIN);
-    const result = waitAtBoundary("bridge", "bridge");
-    if (foreign) {
-      await expect(result).rejects.toThrow("agents.run not_owner: bridge");
-    } else {
-      await expect(result).resolves.toMatchObject({
-        runId: "bridge",
-        status: "done",
-        result: "result-bridge",
-      });
-    }
-  });
-
-  it.each([false, true])(
-    "parks without polling and handles a replacement (foreign=%s)",
-    async (foreign) => {
+  it.each([
+    ["tool", false],
+    ["tool", true],
+    ["bridge", true],
+  ] as const)(
+    "parks without polling and handles a %s replacement (foreign=%s)",
+    async (boundary, foreign) => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
       const runId = "collector-run";
       const entry = addRun("previous", undefined, { swarmRunId: runId });
@@ -303,7 +309,7 @@ describe("agents_wait", () => {
           return selected;
         }),
       );
-      const wait = startWait(runId);
+      const wait = startWait(runId, 1, boundary);
       onTestFinished(() => reads.mockRestore());
       expect(registryEvents.listeners.size).toBe(1);
       await initialRead.promise;
@@ -320,7 +326,7 @@ describe("agents_wait", () => {
       publishChanges();
       await vi.advanceTimersByTimeAsync(0);
       if (foreign) {
-        expect(await wait.observed).toEqual({ value: notOwner(runId) });
+        expect(await wait.observed).toEqual(deniedAtBoundary(boundary, runId));
       } else {
         expect(wait.state.result).toMatchObject({
           completed: [
@@ -348,15 +354,16 @@ describe("agents_wait", () => {
     failed.completion = { required: false, resultText: null, capturedAt: 10 };
     addRun("pending");
     const result = await executeWait([failed.runId, "pending"]);
+
     expect(result.details).toEqual({
       completed: [
         {
-          runId: "failed",
+          runId: failed.runId,
           status: "failed",
           result: "",
           structured: { partial: true },
           error: "provider failed after tool output",
-          sessionKey: "agent:worker:subagent:failed",
+          sessionKey: failed.childSessionKey,
           groupId: "group",
           runtimeMs: 75,
         },
@@ -364,6 +371,37 @@ describe("agents_wait", () => {
       pending: ["pending"],
     });
     expect(isToolResultError(result)).toBe(false);
+    const activity = createNestedToolActivity({
+      runId: "owning-parent-run",
+      scopeId: "code-mode-scope",
+      afterEntryId: null,
+      startOrder: 0,
+      toolCallId: "wait-call",
+      toolName: "agents_wait",
+      input: { ids: ["failed", "pending"] },
+      result,
+      isError: false,
+      startedAt: 1,
+      timestamp: 2,
+    });
+    records.clear();
+    const persisted = JSON.stringify(activity);
+    const history = projectAgentHistoryActivity([
+      { messageId: "persisted-wait", message: JSON.parse(persisted) },
+    ]);
+    expect(history[0]?.items[0]).toMatchObject({ name: "agents_wait", status: "completed" });
+    expect(readNestedToolActivity(JSON.parse(persisted))?.details.result.details).toMatchObject({
+      completed: [
+        {
+          runId: "failed",
+          sessionKey: "agent:worker:subagent:failed",
+          runtimeMs: 75,
+          status: "failed",
+          error: "provider failed after tool output",
+        },
+      ],
+      pending: ["pending"],
+    });
   });
 
   it.each([-60_000, 60_000])(
@@ -445,49 +483,65 @@ describe("agents_wait", () => {
     expect(isToolResultError(first)).toBe(false);
   });
 
-  it("rechecks persisted completion ownership at read settlement", async () => {
-    await withPersistedState(async (state) => {
-      const entry = storedRun({
-        ...collectorRun("persisted-owner-change", MAIN, { status: "done" }),
-        generation: 1,
-      });
-      saveSubagentRegistryToSqlite(new Map([[entry.runId, entry]]));
-      const replacement = storedRun({
-        ...collectorRun(entry.runId, "agent:other:main", { status: "done" }),
-        generation: 2,
-      });
-      await subscribePersisted();
-      let publication: Promise<void> | undefined;
-      registryEvents.read.mockImplementation(async (runIds) => {
-        const prepared = await state.prepareSubagentRunsSnapshotForRunIds(new Map(), runIds);
-        publication ??= Promise.resolve().then(() => {
-          persistCollectorReadFixture(state, replacement);
+  it.each(["tool", "bridge"] as const)(
+    "rechecks a persisted %s completion after ownership changes at read settlement",
+    async (boundary) => {
+      await withPersistedState(async (state) => {
+        const entry = storedRun({
+          ...collectorRun("persisted-owner-change", MAIN, { status: "done" }),
+          generation: 1,
         });
-        void publication.catch(() => {});
-        return prepared;
+        saveSubagentRegistryToSqlite(new Map([[entry.runId, entry]]));
+        const replacement = storedRun({
+          ...collectorRun(entry.runId, "agent:other:main", { status: "done" }),
+          generation: 2,
+        });
+        await subscribePersisted();
+        let publication: Promise<void> | undefined;
+        registryEvents.read.mockImplementation(async (runIds) => {
+          const prepared = await state.prepareSubagentRunsSnapshotForRunIds(new Map(), runIds);
+          publication ??= Promise.resolve().then(() => {
+            persistCollectorReadFixture(state, replacement);
+          });
+          void publication.catch(() => {});
+          return prepared;
+        });
+        const reads = vi.spyOn(stateReads, "executeExistingOpenClawStateRead");
+        const abort = new AbortController();
+        const waiting =
+          boundary === "tool"
+            ? executeWait([entry.runId], 0, abort.signal).then((result) => result.details)
+            : waitForCollectorCompletion({
+                runId: entry.runId,
+                currentSessionKeys: new Set([MAIN]),
+                currentAgentId: "main",
+                signal: abort.signal,
+              });
+        const observed = observe(waiting);
+        try {
+          const result = await observed;
+          await publication;
+          expect(reads.mock.calls.some(([, command]) => command.type === "subagents.runs")).toBe(
+            true,
+          );
+          expect(result).toEqual(deniedAtBoundary(boundary, entry.runId));
+        } finally {
+          abort.abort();
+          await Promise.allSettled([waiting, publication]);
+          reads.mockRestore();
+        }
       });
-      const reads = vi.spyOn(stateReads, "executeExistingOpenClawStateRead");
-      const abort = new AbortController();
-      const waiting = executeWait([entry.runId], 0, abort.signal).then((result) => result.details);
-      const observed = observe(waiting);
-      try {
-        const result = await observed;
-        await publication;
-        expect(reads.mock.calls.some(([, command]) => command.type === "subagents.runs")).toBe(
-          true,
-        );
-        expect(result).toEqual({ value: notOwner(entry.runId) });
-      } finally {
-        abort.abort();
-        await Promise.allSettled([waiting, publication]);
-        reads.mockRestore();
-      }
-    });
-  });
+    },
+  );
 
-  it.each(["completed", "foreign"])(
-    "coalesces publications during pending reads before returning a %s replacement",
-    async (replacement) => {
+  it.each([
+    ["tool", "completed"],
+    ["bridge", "completed"],
+    ["tool", "foreign"],
+    ["bridge", "foreign"],
+  ] as const)(
+    "coalesces publications during pending %s reads before returning a %s replacement",
+    async (boundary, replacement) => {
       const runId = "collector-run";
       const previous = addRun("previous", undefined, { swarmRunId: runId });
       const firstRead = createDeferred();
@@ -504,7 +558,7 @@ describe("agents_wait", () => {
           return preparedRuns(() => selectRuns(records, runIds));
         });
       const controller = new AbortController();
-      const observed = observe(waitAtBoundary("tool", runId, controller.signal));
+      const observed = observe(waitAtBoundary(boundary, runId, controller.signal));
       try {
         expect(registryEvents.listeners.size).toBe(1);
         publishChanges(3);
@@ -529,7 +583,7 @@ describe("agents_wait", () => {
         secondRead.resolve();
         const result = await observed;
         if (replacement === "foreign") {
-          expect(result).toEqual({ value: notOwner(runId) });
+          expect(result).toEqual(deniedAtBoundary(boundary, runId));
         } else {
           const completed = {
             runId,
@@ -537,7 +591,7 @@ describe("agents_wait", () => {
             sessionKey: current.childSessionKey,
           };
           expect(result).toMatchObject({
-            value: { completed: [completed], pending: [] },
+            value: boundary === "tool" ? { completed: [completed], pending: [] } : completed,
           });
         }
         expect(registryEvents.read).toHaveBeenCalledTimes(2);
@@ -648,51 +702,53 @@ describe("agents_wait", () => {
     });
   });
 
-  it.each(["completion", "failure"])(
-    "joins the read after abort wins its pending %s",
-    async (outcome) => {
-      const entry = collectorRun("pending-read", MAIN, { status: "done" });
-      const read = createDeferred<ReadonlyMap<string, SubagentRunRecord>>();
-      const readFailure = new Error("worker read failed", {
-        cause: new Error("reader cleanup failed"),
-      });
-      let readSettled = false;
-      registryEvents.read.mockImplementationOnce(async () => {
-        try {
-          const entries = await read.promise;
-          return preparedRuns(() => entries);
-        } finally {
-          readSettled = true;
-        }
-      });
-      const controller = new AbortController();
-      const observed = waitAtBoundary("tool", entry.runId, controller.signal).then(
-        (value) => ({ value, readSettled }),
-        (error: unknown) => ({ error, readSettled }),
-      );
+  it.each([
+    ["tool", "completion"],
+    ["bridge", "completion"],
+    ["tool", "failure"],
+    ["bridge", "failure"],
+  ] as const)("joins the %s read after abort wins its pending %s", async (boundary, outcome) => {
+    const entry = collectorRun("pending-read", MAIN, { status: "done" });
+    const read = createDeferred<ReadonlyMap<string, SubagentRunRecord>>();
+    const readFailure = new Error("worker read failed", {
+      cause: new Error("reader cleanup failed"),
+    });
+    let readSettled = false;
+    registryEvents.read.mockImplementationOnce(async () => {
       try {
-        controller.abort();
-        if (outcome === "failure") {
-          read.reject(readFailure);
-        } else {
-          read.resolve(new Map([[entry.runId, entry]]));
-        }
-        expect(await observed).toMatchObject({
-          error: {
-            message: "agents_wait aborted.",
-            ...(outcome === "failure" ? { cause: readFailure } : {}),
-          },
-          readSettled: true,
-        });
-        expect(registryEvents.read).toHaveBeenCalledOnce();
-        expect(registryEvents.listeners.size).toBe(0);
+        const entries = await read.promise;
+        return preparedRuns(() => entries);
       } finally {
-        controller.abort();
-        read.resolve(new Map());
-        await observed;
+        readSettled = true;
       }
-    },
-  );
+    });
+    const controller = new AbortController();
+    const observed = waitAtBoundary(boundary, entry.runId, controller.signal).then(
+      (value) => ({ value, readSettled }),
+      (error: unknown) => ({ error, readSettled }),
+    );
+    try {
+      controller.abort();
+      if (outcome === "failure") {
+        read.reject(readFailure);
+      } else {
+        read.resolve(new Map([[entry.runId, entry]]));
+      }
+      expect(await observed).toMatchObject({
+        error: {
+          message: boundary === "tool" ? "agents_wait aborted." : "agents.run wait aborted.",
+          ...(outcome === "failure" ? { cause: readFailure } : {}),
+        },
+        readSettled: true,
+      });
+      expect(registryEvents.read).toHaveBeenCalledOnce();
+      expect(registryEvents.listeners.size).toBe(0);
+    } finally {
+      controller.abort();
+      read.resolve(new Map());
+      await observed;
+    }
+  });
 
   it("does not treat a routed completion owner as the spawning session", async () => {
     addRun(
@@ -757,7 +813,8 @@ describe("agents_wait", () => {
     { ids: [" ", "\t"], timeoutSeconds: 0, error: "at least one non-empty run id" },
     { timeoutSeconds: 0, error: "array of run id strings" },
     { ids: [7], timeoutSeconds: 0, error: "array of run id strings" },
-    { ids: ["pending"], awaitResults: true, timeoutSeconds: 1, error: "cannot also specify" },
+    { ids: "missing", timeoutSeconds: 0, error: "array of run id strings" },
+    { ids: 7, timeoutSeconds: 0, error: "array of run id strings" },
     {
       ids: Array.from({ length: 1_001 }, (_, index) => `run-${index}`),
       error: "at most 1000 ids",
@@ -822,6 +879,32 @@ describe("agents_wait", () => {
       }
     },
   );
+
+  it("cancels required collection without borrowing another requester's child", async () => {
+    const entry = addRun("foreign-required", undefined, {}, "agent:other:main");
+    const tool = createMainSessionWaitTool();
+    await expect(
+      tool.execute("foreign", { ids: [entry.runId], awaitResults: true }),
+    ).resolves.toMatchObject({
+      details: { success: false, errors: [{ runId: entry.runId, error: "not_owner" }] },
+    });
+    entry.swarmRequesterSessionKey = MAIN;
+    const read = observeRead();
+    const abort = new AbortController();
+    const result = tool.execute(
+      "required-abort",
+      { ids: [entry.runId], awaitResults: true },
+      abort.signal,
+    );
+    const rejected = expect(result).rejects.toThrow("agents_wait aborted");
+    await read;
+    abort.abort();
+    await rejected;
+    expect(registryEvents.listeners.size).toBe(0);
+    await expect(
+      tool.execute("ambiguous-wait", { ids: [entry.runId], awaitResults: true, timeoutSeconds: 1 }),
+    ).rejects.toThrow("cannot also specify");
+  });
 
   it.each([
     { outcome: "done", codeMode: true },

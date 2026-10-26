@@ -98,7 +98,7 @@ it("scopes room dedupe to the owning account", async () => {
 
 it("reports an unavailable room snapshot and leaves its claim available for a later join", async () => {
   const params = createJoinParams("missing-context");
-  params.resolveRoomContext.mockResolvedValueOnce(null);
+  vi.mocked(params.resolveRoomContext).mockResolvedValueOnce(null);
   await expectJoin(params, { kind: "skipped", reason: "no-context" });
   await expectJoin(params);
 });

@@ -154,11 +154,13 @@ it("dispatches through the admitted Gateway and fences replacement or retirement
       ),
   );
 
-  expect(admitted.requests.map(({ params }) => params?.sessionKey ?? params?.key)).toEqual([
-    snapshot.sessionKey,
-    snapshot.sessionKey,
-    snapshot.sessionKey,
-  ]);
+  expect(admitted.requests).toHaveLength(3);
+  expect(admitted.requests.slice(0, 2)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ params: { sessionKey: snapshot.sessionKey } }),
+      expect.objectContaining({ params: { key: snapshot.sessionKey } }),
+    ]),
+  );
   expect(admitted.requests[2]?.params).toEqual({
     key: snapshot.sessionKey,
     boardFace: "dashboard",

@@ -85,7 +85,11 @@ it.each<Case>([
 ])("resolves transport %j", (signal, ...checks) => {
   for (const [expected, accountId, exact] of checks) {
     const resolved = resolveSignalAccount({ cfg: config(signal), accountId });
-    expect(resolved.transport)[exact ? "toEqual" : "toMatchObject"](expected);
+    if (exact) {
+      expect(resolved.transport).toEqual(expected);
+    } else {
+      expect(resolved.transport).toMatchObject(expected);
+    }
     if (expected.baseUrl) {
       expect(resolved.baseUrl).toBe(expected.baseUrl);
     }

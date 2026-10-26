@@ -1,32 +1,58 @@
-import { setTimeout as delay } from "node:timers/promises";
 import { WebClient, type WebClientOptions } from "@slack/web-api";
-import { expect, it } from "vitest";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { describe, expect, it } from "vitest";
 import { createSlackWriteClient, resolveSlackWriteClientOptions } from "./client.js";
 import { appendSlackStream, startSlackStream, stopSlackStream } from "./streaming.js";
 
 type StreamMethod = "chat.startStream" | "chat.appendStream" | "chat.stopStream";
 type SlackFetch = NonNullable<WebClientOptions["fetch"]>;
-const success = () => Response.json({ ok: true, ts: "1700000000.000100" });
+const STREAM_TS = "1700000000.000100";
+const success = () => Response.json({ ok: true, ts: STREAM_TS });
 const rateLimited = (retryAfter = "0", body: BodyInit = "rate limited") =>
   new Response(body, { status: 429, headers: { "retry-after": retryAfter } });
-const write = (fetch: SlackFetch, opts: WebClientOptions = {}, assert?: () => void) => {
-  const client = createSlackWriteClient("fixture", { fetch, ...opts }, assert);
-  return client.apiCall("chat.postMessage", { channel: "CFIXTURE", text: "answer" });
-};
+const send = (client: WebClient, text = "answer") =>
+  client.apiCall("chat.postMessage", { channel: "CFIXTURE", text });
 
-function transport(reply = (_attempt: number) => rateLimited(), method = "chat.postMessage") {
-  const requests = new Map<string, Array<RequestInit["body"]>>();
+function rejectedTransport(retryAfter = "0", onRequest = () => {}) {
   const responses: Response[] = [];
-  const fetch: SlackFetch = async (input, init) => {
-    const current = new URL(input).pathname.split("/").at(-1) ?? "";
-    const bodies = requests.get(current) ?? [];
-    requests.set(current, bodies);
-    bodies.push(init?.body);
-    const response = current === method ? reply(bodies.length) : success();
+  const fetch: SlackFetch = async () => {
+    onRequest();
+    const response = rateLimited(retryAfter);
     responses.push(response);
     return response;
   };
-  return { fetch, requests, responses };
+  return { fetch, responses };
+}
+
+function createRateLimitTransport(
+  method: StreamMethod | "chat.postMessage",
+  terminal: "success" | "socket",
+  brokenBody = false,
+) {
+  const requests: Array<{ method: string; body: string }> = [];
+  let attempts = 0;
+  const fetch: SlackFetch = async (input, init) => {
+    const currentMethod = new URL(input).pathname.split("/").at(-1) ?? "";
+    if (typeof init?.body !== "string") {
+      throw new Error("Expected Slack's URL-encoded streaming request");
+    }
+    requests.push({ method: currentMethod, body: init.body });
+    if (currentMethod === method && ++attempts === 1) {
+      const body = brokenBody
+        ? new ReadableStream({
+            start(controller) {
+              controller.error(new Error("rejected response body interrupted"));
+            },
+          })
+        : JSON.stringify({ ok: false, error: "ratelimited" });
+      return rateLimited("0", body);
+    }
+    if (currentMethod === method && terminal === "socket") {
+      throw new Error("synthetic lost acknowledgment");
+    }
+    return success();
+  };
+  return { fetch, requests };
 }
 
 async function runStreamOperation(method: StreamMethod, fetch: SlackFetch) {
@@ -34,12 +60,15 @@ async function runStreamOperation(method: StreamMethod, fetch: SlackFetch) {
     fetch,
     slackApiUrl: "https://synthetic.slack.invalid/api/",
     retryConfig: { retries: 2, minTimeout: 1, maxTimeout: 1 },
+    teamId: "TFIXTURE",
   };
+  const client = new WebClient("synthetic-rate-limit-fixture", clientOptions);
   const session = await startSlackStream({
-    client: new WebClient("fixture", clientOptions),
+    client,
     clientOptions,
     channel: "CFIXTURE",
     threadTs: "1700000000.000001",
+    teamId: "TRECIPIENT",
     userId: "UFIXTURE",
     text: method === "chat.startStream" ? "answer" : "prefix",
     chunks: [],
@@ -55,96 +84,117 @@ async function runStreamOperation(method: StreamMethod, fetch: SlackFetch) {
   return session;
 }
 
-it.each(["retry", "abort"] as const)("pending 429 cancellation: %s", async (action) => {
-  const cleanup = Promise.withResolvers<void>();
-  let bodyController!: ReadableStreamDefaultController;
-  let cancelled = false;
-  const body = new ReadableStream({
-    start(controller) {
-      bodyController = controller;
+describe("Slack explicit rate-limit recovery", () => {
+  it.each(["retry", "abort"] as const)(
+    "allows %s while a discarded 429 body and its cancellation remain pending",
+    async (action) => {
+      const cleanup = createDeferred<void>();
+      let bodyController!: ReadableStreamDefaultController;
+      let cancelled = false;
+      let attempts = 0;
+      const body = new ReadableStream({
+        start(controller) {
+          bodyController = controller;
+        },
+        cancel() {
+          cancelled = true;
+          return cleanup.promise;
+        },
+      });
+      const fetch: SlackFetch = async () => {
+        attempts += 1;
+        return attempts === 1 ? rateLimited(action === "abort" ? "60" : "0", body) : success();
+      };
+      const operation =
+        action === "retry"
+          ? runStreamOperation("chat.startStream", fetch)
+          : send(createSlackWriteClient("stalled-cancel", { fetch, timeout: 20 }));
+      const settled = operation.then(
+        () => "delivered",
+        () => "aborted",
+      );
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const outcome = await Promise.race([
+          settled,
+          new Promise<string>((resolve) => {
+            deadline = setTimeout(() => resolve("stalled"), 1_000);
+          }),
+        ]);
+        expect({ outcome, cancelled, attempts }).toEqual({
+          outcome: action === "retry" ? "delivered" : "aborted",
+          cancelled: true,
+          attempts: action === "retry" ? 3 : 1,
+        });
+      } finally {
+        clearTimeout(deadline);
+        bodyController.error(new Error("test cleanup"));
+        cleanup.resolve();
+        await settled;
+      }
     },
-    cancel() {
-      cancelled = true;
-      return cleanup.promise;
-    },
-  });
-  const { fetch, responses } = transport((attempt) =>
-    attempt === 1 ? rateLimited(action === "abort" ? "60" : "0", body) : success(),
   );
-  const operation = write(fetch, { timeout: action === "abort" ? 20 : 0 });
-  const settled = operation.then(() => "delivered").catch(() => "aborted");
-  const deadline = new AbortController();
-  try {
-    const outcome = await Promise.race([
-      settled,
-      delay(1_000, "stalled", { signal: deadline.signal }),
-    ]);
-    expect({ outcome, cancelled, attempts: responses.length }).toEqual({
-      outcome: action === "retry" ? "delivered" : "aborted",
-      cancelled: true,
-      attempts: action === "retry" ? 2 : 1,
+  it.each(["chat.startStream", "chat.appendStream", "chat.stopStream"] as const)(
+    "retries rejected %s with identical bodies, including a broken start response",
+    async (method) => {
+      const brokenBody = method === "chat.startStream";
+      const transport = createRateLimitTransport(method, "success", brokenBody);
+      const session = await runStreamOperation(method, transport.fetch);
+      const attempts = transport.requests.filter((request) => request.method === method);
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]?.body).toBe(attempts[1]?.body);
+      const body = new URLSearchParams(attempts[1]?.body);
+      if (!brokenBody) {
+        expect(body.get("team_id")).toBe("TFIXTURE");
+        expect(JSON.parse(body.get("chunks") ?? "[]")).toEqual([
+          { type: "markdown_text", text: "answer" },
+        ]);
+      }
+      expect(session).toMatchObject({ stopped: true, delivered: true, pendingText: "" });
+    },
+  );
+
+  it("does not replay an ambiguous socket response after an explicit rate-limit retry", async () => {
+    const transport = createRateLimitTransport("chat.appendStream", "socket");
+    await expect(runStreamOperation("chat.appendStream", transport.fetch)).rejects.toThrow();
+    expect(
+      transport.requests.filter((request) => request.method === "chat.appendStream"),
+    ).toHaveLength(2);
+    expect(transport.requests.some((request) => request.method === "chat.stopStream")).toBe(false);
+  });
+
+  it("revalidates direct-delivery authority before a refused write is retried", async () => {
+    let authorized = true;
+    const transport = rejectedTransport("0", () => {
+      authorized = false;
     });
-  } finally {
-    deadline.abort();
-    bodyController.error(new Error("test cleanup"));
-    cleanup.resolve();
-    await settled;
-  }
-});
-it.each([
-  ["chat.startStream", false],
-  ["chat.appendStream", false],
-  ["chat.stopStream", false],
-  ["chat.appendStream", true],
-] as const)("retries %s (lost ack: %s)", async (method, lostAck) => {
-  const body =
-    method === "chat.startStream"
-      ? new ReadableStream({
-          start: (controller) => controller.error(new Error("broken response body")),
-        })
-      : "rate limited";
-  const { fetch, requests } = transport((attempt) => {
-    if (attempt === 1) {
-      return rateLimited("0", body);
-    }
-    if (lostAck) {
-      throw new Error("synthetic lost acknowledgment");
-    }
-    return success();
-  }, method);
-  const operation = runStreamOperation(method, fetch);
-  if (lostAck) {
-    await expect(operation).rejects.toThrow("synthetic lost acknowledgment");
-    expect(requests.has("chat.stopStream")).toBe(false);
-  } else {
-    await expect(operation).resolves.toMatchObject({ delivered: true });
-  }
-  const attempts = requests.get(method) ?? [];
-  expect(attempts).toHaveLength(2);
-  expect(attempts[0]).toBe(attempts[1]);
-});
+    const client = createSlackWriteClient(
+      "synthetic-live-authority-fixture",
+      { fetch: transport.fetch },
+      () => {
+        if (!authorized) {
+          throw new Error("direct delivery is no longer active");
+        }
+      },
+    );
 
-it("revalidates direct-delivery authority before a refused write is retried", async () => {
-  let authorized = true;
-  const { fetch, responses } = transport(() => {
-    authorized = false;
-    return rateLimited();
-  });
-  const operation = write(fetch, {}, () => {
-    if (!authorized) {
-      throw new Error("direct delivery is no longer active");
-    }
+    await expect(send(client)).rejects.toThrow("direct delivery is no longer active");
+    expect(transport.responses).toHaveLength(1);
   });
 
-  await expect(operation).rejects.toThrow("direct delivery is no longer active");
-  expect(responses).toHaveLength(1);
-});
-it.each([
-  ["2147001", 1],
-  ["0", 3],
-] as const)("bounds reused retries: %s", async (retryAfter, count) => {
-  const { fetch, responses } = transport(() => rateLimited(retryAfter));
-  await expect(write(fetch, resolveSlackWriteClientOptions({ fetch }))).rejects.toThrow();
-  expect(responses).toHaveLength(count);
-  expect(responses.every((response) => response.bodyUsed)).toBe(true);
+  it("bounds rate-limit recovery for 2147001 to one request", async () => {
+    const { fetch, responses } = rejectedTransport("2147001");
+    const client = createSlackWriteClient("synthetic-budget-fixture", { fetch });
+    await expect(send(client)).rejects.toThrow();
+    expect(responses).toHaveLength(1);
+    expect(responses.every((response) => response.bodyUsed)).toBe(true);
+  });
+
+  it("does not multiply the retry budget when pre-resolved options are reused", async () => {
+    const { fetch, responses } = rejectedTransport();
+    const options = resolveSlackWriteClientOptions({ fetch });
+    const client = createSlackWriteClient("synthetic-reused-fixture", options);
+    await expect(send(client)).rejects.toThrow();
+    expect(responses).toHaveLength(3);
+  });
 });
