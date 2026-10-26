@@ -4,7 +4,16 @@ export function warmReloadProbe() {
   const mutations: Array<{ at: number; count: number; region: string }> = [];
   const shifts: Array<{ at: number; value: number }> = [];
   const states: Array<{ at: number; state: string }> = [];
-  const reads: Array<{ at: number; store: string; hit: boolean }> = [];
+  const reads: Array<{ at: number; store: string; hit: boolean; cursor?: boolean }> = [];
+  const historyRequests: Array<{
+    method: string;
+    sentAt: number;
+    cursor: boolean;
+    receivedAt?: number;
+    responseBytes?: number;
+    kind?: string;
+    messages?: number;
+  }> = [];
   const transactions: Array<{
     at: number;
     label: string;
@@ -144,7 +153,14 @@ export function warmReloadProbe() {
     const request = get.apply(this, args);
     const store = this.name;
     request.addEventListener("success", () => {
-      reads.push({ at: performance.now(), store, hit: request.result !== undefined });
+      reads.push({
+        at: performance.now(),
+        store,
+        hit: request.result !== undefined,
+        ...(store === "snapshots"
+          ? { cursor: Boolean(request.result?.snapshot?.deltaCursor) }
+          : {}),
+      });
       if (store === "snapshots" && request.result !== undefined) {
         mark("cacheRead");
       }
@@ -157,13 +173,30 @@ export function warmReloadProbe() {
       mark("socketCreated");
       const socket: WebSocket = Reflect.construct(target, args);
       socket.addEventListener("open", () => mark("socketOpen"), { once: true });
-      const pending = new Map<string, string>();
+      const pending = new Map<
+        string,
+        { method: string; history?: (typeof historyRequests)[number] }
+      >();
       const send = socket.send.bind(socket);
       socket.send = (data) => {
         if (typeof data === "string") {
           const frame = JSON.parse(data);
           if (frame.type === "req") {
-            pending.set(frame.id, frame.method);
+            const params = frame.params?.initialHistory ?? frame.params;
+            const history =
+              frame.method === "chat.startup" ||
+              frame.method === "chat.history" ||
+              (frame.method === "sessions.messages.subscribe" && frame.params?.initialHistory)
+                ? {
+                    method: frame.method,
+                    sentAt: performance.now(),
+                    cursor: Boolean(params?.cursor),
+                  }
+                : undefined;
+            if (history) {
+              historyRequests.push(history);
+            }
+            pending.set(frame.id, { method: frame.method, history });
             if (frame.method === "connect") {
               mark("connectSent");
             } else if (milestones.hello !== undefined) {
@@ -178,9 +211,20 @@ export function warmReloadProbe() {
         if (frame.type === "event" && frame.event === "connect.challenge") {
           mark("challenge");
         }
-        const method = pending.get(frame.id);
-        if (method) {
+        const request = pending.get(frame.id);
+        if (request) {
           pending.delete(frame.id);
+          const { method, history } = request;
+          if (history) {
+            const result =
+              method === "sessions.messages.subscribe"
+                ? frame.payload?.initialHistory?.payload
+                : frame.payload;
+            history.receivedAt = performance.now();
+            history.responseBytes = new TextEncoder().encode(event.data).byteLength;
+            history.kind = result?.kind ?? (result?.messages ? "window" : "error");
+            history.messages = result?.messages?.length;
+          }
           if (method === "connect") {
             mark("hello");
           }
@@ -383,6 +427,7 @@ export function warmReloadProbe() {
         transcriptPaints,
         largestPaints,
         reads,
+        historyRequests,
         transactions,
         shifts,
         cls: shifts.reduce((sum, shift) => sum + shift.value, 0),
