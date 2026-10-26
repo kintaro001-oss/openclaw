@@ -1,4 +1,3 @@
-// Tests gateway lock file ownership and stale-lock behavior.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -57,9 +56,7 @@ async function acquireForTest(
     timeoutMs: 30,
     pollIntervalMs: 2,
     now: realNow,
-    sleep: async (ms) => {
-      await nativeSleep(ms);
-    },
+    sleep: nativeSleep,
     lockDir: resolveTestLockDir(env),
     ...opts,
   });
@@ -123,6 +120,11 @@ async function writeRecentLockFile(env: NodeJS.ProcessEnv, startTime = 111) {
     startTime,
     createdAt: new Date().toISOString(),
   });
+}
+
+function mockProcessIdentity(cmdline: string[] | null, startTime: number | null = null) {
+  vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockReturnValue(cmdline);
+  vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockReturnValue(startTime);
 }
 
 async function holdLifecycleCoordinator(signal: AbortSignal) {
@@ -359,18 +361,14 @@ describe("gateway lock", () => {
         lockDir: resolveTestLockDir(env),
         platform: "darwin",
       });
-      expect(firstIdentity).toMatchObject({
-        pid: process.pid,
-        ownerId: expect.any(String),
-        cronOwnerProjection: "dynamic-default-v1",
-        port: 48789,
-      });
-      expect(secondIdentity).toMatchObject({
-        pid: process.pid,
-        ownerId: expect.any(String),
-        cronOwnerProjection: "dynamic-default-v1",
-        port: 48789,
-      });
+      for (const identity of [firstIdentity, secondIdentity]) {
+        expect(identity).toMatchObject({
+          pid: process.pid,
+          ownerId: expect.any(String),
+          cronOwnerProjection: "dynamic-default-v1",
+          port: 48789,
+        });
+      }
       expect(secondIdentity?.ownerId).not.toBe(firstIdentity?.ownerId);
       await expect(
         readActiveGatewayLockPort({ env, lockDir: resolveTestLockDir(env), ...options }),
@@ -435,7 +433,6 @@ describe("gateway lock", () => {
   );
 
   it("serializes concurrent stale-lock reclamation", async () => {
-    vi.useRealTimers();
     const env = await makeEnv();
     const { configPath, stateLockPath } = resolveLockPath(env);
     await fs.mkdir(path.dirname(stateLockPath), { recursive: true });
@@ -481,7 +478,6 @@ describe("gateway lock", () => {
   });
 
   it("preserves a fresh gateway lock that replaces the stale reclaim candidate", async () => {
-    vi.useRealTimers();
     const env = await makeEnv();
     const { configPath, stateLockPath } = resolveLockPath(env);
     await fs.mkdir(path.dirname(stateLockPath), { recursive: true });
@@ -514,46 +510,16 @@ describe("gateway lock", () => {
   });
 
   it.each([
-    ["doctor", "--state-sqlite", "compact"],
-    ["sessions", "cleanup", "--enforce"],
-  ])(
-    "keeps a verified %s maintenance owner when process start identity is unavailable",
-    async (...args) => {
-      vi.useRealTimers();
-      const env = await makeEnv();
-      const { lockPath, configPath } = resolveLockPath(env);
-      await fs.writeFile(
-        lockPath,
-        JSON.stringify(
-          createLockPayload({
-            configPath,
-            createdAt: "2000-01-01T00:00:00.000Z",
-            role: "sqlite-maintenance",
-            startTime: 111,
-          }),
-        ),
-        "utf8",
-      );
-
-      vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-        () => null,
-      );
-      vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
-        "node",
-        "/srv/openclaw/openclaw.mjs",
-        ...args,
-      ]);
-      await expect(
-        acquireForTest(env, {
-          timeoutMs: 15,
-          platform: "linux",
-        }),
-      ).rejects.toBeInstanceOf(GatewayLockError);
+    {
+      label: "doctor",
+      cmdline: ["node", "/srv/openclaw/openclaw.mjs", "doctor", "--state-sqlite", "compact"],
     },
-  );
-
-  it("keeps an old maintenance owner when its live identity is unreadable", async () => {
-    vi.useRealTimers();
+    {
+      label: "sessions",
+      cmdline: ["node", "/srv/openclaw/openclaw.mjs", "sessions", "cleanup", "--enforce"],
+    },
+    { label: "unreadable", cmdline: null },
+  ])("keeps an old maintenance owner with $label identity", async ({ cmdline }) => {
     const env = await makeEnv();
     const { lockPath, configPath } = resolveLockPath(env);
     await fs.writeFile(
@@ -566,25 +532,14 @@ describe("gateway lock", () => {
           startTime: 111,
         }),
       ),
-      "utf8",
     );
-
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => null,
-    );
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(
-      () => null,
-    );
+    mockProcessIdentity(cmdline);
     await expect(
-      acquireForTest(env, {
-        platform: "linux",
-        timeoutMs: 80,
-      }),
+      acquireForTest(env, { timeoutMs: cmdline ? 15 : 80, platform: "linux" }),
     ).rejects.toBeInstanceOf(GatewayLockError);
   });
 
   it("preserves historical ownership when filesystem identity inspection fails", async () => {
-    vi.useRealTimers();
     const env = await makeEnv();
     const { lockPath } = await writeLockFile(env);
     const original = await fs.readFile(lockPath, "utf8");
@@ -592,12 +547,7 @@ describe("gateway lock", () => {
       throw Object.assign(new Error("EPERM"), { code: "EPERM" });
     });
 
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => null,
-    );
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(
-      () => null,
-    );
+    mockProcessIdentity(null);
     const pending = acquireForTest(env, {
       timeoutMs: 20,
       platform: "linux",
@@ -608,44 +558,13 @@ describe("gateway lock", () => {
     await expect(fs.readFile(lockPath, "utf8")).resolves.toBe(original);
   });
 
-  it("preserves a live PID when only its command line differs", async () => {
-    vi.useRealTimers();
-    const env = await makeEnv();
-    const script = path.join(env.OPENCLAW_STATE_DIR, "worker.js");
-    await fs.writeFile(script, "");
-    await writeRecentLockFile(env);
-
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
-      "node",
-      script,
-    ]);
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => null,
-    );
-    await expect(
-      acquireForTest(env, {
-        timeoutMs: 80,
-        pollIntervalMs: 5,
-        platform: "darwin",
-        port: 18789,
-      }),
-    ).rejects.toBeInstanceOf(GatewayLockError);
-  });
-
   it("bounds oversized lock polling intervals by the acquire timeout", async () => {
     const env = await makeEnv();
     await writeRecentLockFile(env);
     const sleepDelays: number[] = [];
     let now = 0;
 
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
-      "/usr/local/bin/openclaw",
-      "gateway",
-      "run",
-    ]);
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => 111,
-    );
+    mockProcessIdentity(["/usr/local/bin/openclaw", "gateway", "run"], 111);
     await expect(
       acquireGatewayLock({
         env,
@@ -681,7 +600,7 @@ describe("gateway lock", () => {
       expect(lock.lockPath).not.toBe(stateLockPath);
       await fs.access(stateLockPath);
       await expect(fs.access(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
-      vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
+      vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockReturnValue([
         "openclaw-gateway",
       ]);
       await expect(
@@ -719,47 +638,32 @@ describe("gateway lock", () => {
     openSpy.mockRestore();
   });
 
-  it("preserves a Windows owner when only its command line differs", async () => {
-    vi.useRealTimers();
-    const env = await makeEnv();
-    await writeRecentLockFile(env);
-
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
-      "chrome.exe",
-      "--no-sandbox",
-    ]);
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => null,
-    );
-    await expect(
-      acquireForTest(env, {
-        timeoutMs: 80,
-        pollIntervalMs: 5,
-        platform: "win32",
-        port: 18789,
-      }),
-    ).rejects.toBeInstanceOf(GatewayLockError);
-  });
-
-  it("falls back to unknown on win32 when cmdline reader returns null", async () => {
-    vi.useRealTimers();
-    const env = await makeEnv();
-    await writeRecentLockFile(env);
-
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(
-      () => null,
-    );
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-      () => null,
-    );
-    const pending = acquireForTest(env, {
-      timeoutMs: 20,
-      pollIntervalMs: 2,
-      platform: "win32",
-      port: 18789,
-    });
-    await expect(pending).rejects.toBeInstanceOf(GatewayLockError);
-  });
+  it.each([
+    { platform: "darwin", cmdline: ["node", "worker.js"] },
+    { platform: "win32", cmdline: ["chrome.exe", "--no-sandbox"] },
+    { platform: "win32", cmdline: null },
+  ] satisfies { platform: NodeJS.Platform; cmdline: string[] | null }[])(
+    "preserves live $platform custody with cmdline $cmdline",
+    async ({ platform, cmdline }) => {
+      const env = await makeEnv();
+      let observedCmdline = cmdline;
+      if (platform === "darwin") {
+        const script = path.join(env.OPENCLAW_STATE_DIR, "worker.js");
+        await fs.writeFile(script, "");
+        observedCmdline = ["node", script];
+      }
+      await writeRecentLockFile(env);
+      mockProcessIdentity(observedCmdline);
+      await expect(
+        acquireForTest(env, {
+          timeoutMs: cmdline ? 80 : 20,
+          pollIntervalMs: cmdline ? 5 : 2,
+          platform,
+          port: 18789,
+        }),
+      ).rejects.toBeInstanceOf(GatewayLockError);
+    },
+  );
 
   it("acquires promptly when the predecessor releases during a prolonged startup wait", async ({
     signal,
