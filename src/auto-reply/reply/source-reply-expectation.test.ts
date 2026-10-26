@@ -30,3 +30,29 @@ describe("implicit thread reply expectation", () => {
     },
   );
 });
+
+describe("exec completion reply expectation", () => {
+  const exec = { kind: "internal_system", sourceTool: "exec" } as const;
+  it.each([
+    {
+      name: "webchat exec wake",
+      ctx: { Provider: "webchat", InputProvenance: exec },
+      expected: "optional",
+    },
+    {
+      name: "subagent exec wake",
+      ctx: { Provider: "webchat", SessionKey: "agent:main:subagent:child", InputProvenance: exec },
+      expected: "result-required",
+    },
+    {
+      name: "webchat restart recovery",
+      ctx: {
+        Provider: "webchat",
+        InputProvenance: { kind: "internal_system", sourceTool: "main_session_restart_recovery" },
+      },
+      expected: "result-required",
+    },
+  ] as const)("selects $expected for $name", ({ ctx, expected }) => {
+    expect(resolveSourceReplyExpectation({ ctx, cfg: {} })).toBe(expected);
+  });
+});
