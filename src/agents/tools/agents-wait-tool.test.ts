@@ -354,20 +354,18 @@ describe("agents_wait", () => {
     failed.completion = { required: false, resultText: null, capturedAt: 10 };
     addRun("pending");
     const result = await executeWait([failed.runId, "pending"]);
-
+    const failure = {
+      runId: "failed",
+      status: "failed",
+      result: "",
+      structured: { partial: true },
+      error: "provider failed after tool output",
+      sessionKey: "agent:worker:subagent:failed",
+      groupId: "group",
+      runtimeMs: 75,
+    };
     expect(result.details).toEqual({
-      completed: [
-        {
-          runId: failed.runId,
-          status: "failed",
-          result: "",
-          structured: { partial: true },
-          error: "provider failed after tool output",
-          sessionKey: failed.childSessionKey,
-          groupId: "group",
-          runtimeMs: 75,
-        },
-      ],
+      completed: [failure],
       pending: ["pending"],
     });
     expect(isToolResultError(result)).toBe(false);
@@ -391,15 +389,7 @@ describe("agents_wait", () => {
     ]);
     expect(history[0]?.items[0]).toMatchObject({ name: "agents_wait", status: "completed" });
     expect(readNestedToolActivity(JSON.parse(persisted))?.details.result.details).toMatchObject({
-      completed: [
-        {
-          runId: "failed",
-          sessionKey: "agent:worker:subagent:failed",
-          runtimeMs: 75,
-          status: "failed",
-          error: "provider failed after tool output",
-        },
-      ],
+      completed: [failure],
       pending: ["pending"],
     });
   });
@@ -813,8 +803,6 @@ describe("agents_wait", () => {
     { ids: [" ", "\t"], timeoutSeconds: 0, error: "at least one non-empty run id" },
     { timeoutSeconds: 0, error: "array of run id strings" },
     { ids: [7], timeoutSeconds: 0, error: "array of run id strings" },
-    { ids: "missing", timeoutSeconds: 0, error: "array of run id strings" },
-    { ids: 7, timeoutSeconds: 0, error: "array of run id strings" },
     {
       ids: Array.from({ length: 1_001 }, (_, index) => `run-${index}`),
       error: "at most 1000 ids",

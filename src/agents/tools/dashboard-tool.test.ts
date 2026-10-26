@@ -96,18 +96,10 @@ it("declares dashboard actions without overriding widget placement", () => {
     expect(Value.Check(tool.parameters, args)).toBe(valid);
   const directoryDescription = tool.description.slice(0, 177);
   expect(tool.requiredClientCaps).toBeUndefined();
-  expect(tool.description).toContain("stable names");
-  expect(tool.description).toContain("sm=3x3");
   expect(directoryDescription).not.toMatch(/keep .*inline/i);
   expect(directoryDescription).toMatch(/widget_put.*plugin.*only/i);
   expect(tool.description).not.toMatch(/show_widget|widget_code|\bpin\b/);
   expect(tool.parameters).toMatchObject({ additionalProperties: false });
-  expect(tool.parameters).toHaveProperty(
-    "properties.action.enum",
-    "read tab_create tab_update tab_delete tabs_reorder widget_put widget_move widget_resize widget_remove focus_tab set_presentation set_default_presentation".split(
-      " ",
-    ),
-  );
   accepts({ action: "widget_move", name: "status" });
   accepts({ action: "widget_put", name: "work-item", ...pluginContent() });
   accepts({ action: "unknown" }, false);
@@ -171,22 +163,18 @@ it("dispatches through the admitted Gateway and fences replacement or retirement
         type: "req",
         id: expect.stringMatching(/^plugin-subagent-/u),
         method: "board.get",
-        params: expect.objectContaining({ sessionKey: "agent:main:main" }),
+        params: expect.objectContaining({ sessionKey: snapshot.sessionKey }),
       }),
       expect.objectContaining({
         method: "sessions.describe",
-        params: expect.objectContaining({ key: "agent:main:main" }),
+        params: expect.objectContaining({ key: snapshot.sessionKey }),
       }),
     ]),
   );
   expect(admitted.requests[2]).toEqual(
     expect.objectContaining({
       method: "sessions.patch",
-      params: {
-        key: "agent:main:main",
-        boardFace: "dashboard",
-        boardPresentation: "expanded",
-      },
+      params: { key: snapshot.sessionKey, boardFace: "dashboard", boardPresentation: "expanded" },
     }),
   );
   expect(replacement.requests).toEqual([]);

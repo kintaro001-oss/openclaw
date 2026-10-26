@@ -55,6 +55,9 @@ async function history(params: Record<string, unknown>) {
 function messageIds(result: { messages: unknown[] }) {
   return result.messages.map(readChatHistoryMessageId);
 }
+function gatewayHistory(params: Record<string, unknown>) {
+  return callGateway<{ messages: unknown[] }>({ method: "chat.history", params });
+}
 function append(
   eventId: string,
   message: Parameters<typeof appendTranscriptMessage>[1]["message"],
@@ -134,18 +137,16 @@ describe("embedded session history anchors", () => {
       expect(hits).toHaveLength(1);
       const hit = expectDefined(hits[0], "search hit");
       expect(hit).toMatchObject(selector);
-      expect(
-        (await history({ sessionKey: hit.sessionKey, limit: 1 })).messages.map(
-          readChatHistoryMessageId,
-        ),
-      ).toEqual(["newest"]);
+      const tail = await history({ sessionKey: hit.sessionKey, limit: 1 });
+      expect(messageIds(tail)).toEqual(["newest"]);
+      expect(tail).not.toHaveProperty("offset");
       const recalled = await history({
         sessionKey: hit.sessionKey,
         messageId: hit.messageId,
         ...(includeSessionId ? { sessionId: hit.sessionId } : {}),
         limit: 1,
       });
-      expect(recalled.messages.map(readChatHistoryMessageId)).toEqual(["old"]);
+      expect(messageIds(recalled)).toEqual(["old"]);
       expect(recalled).not.toHaveProperty("nextOffset");
     },
   );
@@ -223,7 +224,6 @@ describe("embedded session history anchors", () => {
     ]);
     const recalled = await history({ ...selector, includeTools: true, limit: 10 });
     expect(messageIds(recalled)).toEqual(["old", "middle", "newest", "old-tool", "reset"]);
-    expect(messageIds(recalled)).not.toContain("fresh");
   });
 
   it.each(["missing", "wrong-key", "wrong-agent"])(
@@ -283,10 +283,7 @@ describe("embedded session history anchors", () => {
 
   it("preserves the anchor when the embedded transport byte cap drops neighbors", async () => {
     vi.spyOn(historyBudget, "getMaxChatHistoryMessagesBytes").mockReturnValue(1_200);
-    const result = await callGateway<{ messages: unknown[] }>({
-      method: "chat.history",
-      params: { ...selector, limit: 3 },
-    });
+    const result = await gatewayHistory({ ...selector, limit: 3 });
     expect(messageIds(result)).toEqual(["old"]);
     expect(Buffer.byteLength(JSON.stringify(result.messages))).toBeLessThanOrEqual(1_200);
   });
@@ -320,8 +317,8 @@ describe("embedded session history anchors", () => {
     { offset: 0, messageId: "old", error: "offset and messageId cannot be used together" },
     { sessionId: scope.sessionId, error: "sessionId requires messageId" },
   ])("rejects incompatible history selectors: $error", async ({ error, ...params }) => {
-    await expect(
-      callGateway({ method: "chat.history", params: { sessionKey: scope.sessionKey, ...params } }),
-    ).rejects.toThrow(error);
+    await expect(gatewayHistory({ sessionKey: scope.sessionKey, ...params })).rejects.toThrow(
+      error,
+    );
   });
 });
