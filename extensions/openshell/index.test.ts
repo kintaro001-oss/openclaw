@@ -45,41 +45,39 @@ const workdirParams: CreateSandboxBackendParams = {
   cfg: createOpenShellBackendSandboxConfig(),
 };
 
+const registries: Array<ReturnType<typeof registerInRegistry>> = [];
+
 function registerInRegistry(pluginConfig: OpenClawPluginApi["pluginConfig"]) {
   const { registry } = createPluginRegistryFixture();
   const record = createPluginRecord({ id: "openshell", origin: "bundled" });
   registry.registry.plugins.push(record);
+  registries.push(registry.registry);
   plugin.register(registry.createApi(record, { config: {}, pluginConfig }));
   return registry.registry;
 }
 
 describe("OpenShell plugin registration lifecycle", () => {
-  const stops: Array<() => Promise<void>> = [];
-
   afterEach(async () => {
-    for (const stop of stops.splice(0).toReversed()) {
-      await stop();
+    clearRuntimeConfigSnapshot();
+    for (const registry of registries.splice(0).toReversed()) {
+      await expect(disposePluginRegistryInstances(registry)).resolves.toMatchObject({
+        failures: [],
+      });
     }
   });
 
   function registerGeneration(remoteWorkspaceDir: string) {
-    const lifecycles: PluginRuntimeLifecycleRegistration[] = [];
-    const api = createTestPluginApi({
-      id: "openshell",
-      pluginConfig: { remoteWorkspaceDir },
-      registerRuntimeLifecycle: (lifecycle) => lifecycles.push(lifecycle),
-    });
-    plugin.register(api);
+    const registry = registerInRegistry({ remoteWorkspaceDir });
     const cleanup = async (
-      context: Parameters<NonNullable<PluginRuntimeLifecycleRegistration["cleanup"]>>[0],
+      context: Parameters<NonNullable<PluginRuntimeLifecycleRegistration["cleanup"]>>[0] = {
+        reason: "disable",
+      },
     ) => {
-      for (const lifecycle of lifecycles.toReversed()) {
+      for (const { lifecycle } of registry.runtimeLifecycles.toReversed()) {
         await lifecycle.cleanup?.(context);
       }
     };
-    const stop = () => cleanup({ reason: "disable" });
-    stops.push(stop);
-    return { backend: readBackend(), cleanup, stop };
+    return { backend: readBackend(), cleanup };
   }
 
   it.each(["disable", "restart"] as const)("restores hooks on global %s", async (reason) => {
@@ -95,7 +93,7 @@ describe("OpenShell plugin registration lifecycle", () => {
 
       await generation.cleanup({ reason });
       expect(readBackend()).toEqual(original);
-      await generation.stop();
+      await generation.cleanup();
       expect(readBackend()).toEqual(original);
     }
   });
@@ -124,35 +122,24 @@ describe("OpenShell plugin registration lifecycle", () => {
     const hooks = createHookRunner(registry, { catchErrors: false });
     const prompt = (agentId = "main") =>
       hooks.runBeforePromptBuild({ prompt: "hello", messages: [] }, { agentId });
-    try {
-      setRuntimeConfigSnapshot({});
-      expect(await prompt()).toBeUndefined();
-      for (const nodeId of ["first-node", "replacement-node"]) {
-        setRuntimeConfigSnapshot({
-          plugins: {
-            entries: {
-              "file-transfer": {
-                enabled: true,
-                config: {
-                  policyVersion: 2,
-                  workspaces: { main: { nodeId, remoteRoot: "/agent/canonical" } },
-                },
-              },
-            },
-          },
-        });
-        expect(await prompt("other")).toBeUndefined();
-        const context = (await prompt())?.appendSystemContext;
-        for (const part of [nodeId, "/agent/canonical", "file_fetch", "file_write"]) {
-          expect(context).toContain(part);
-        }
+    setRuntimeConfigSnapshot({});
+    expect(await prompt()).toBeUndefined();
+    for (const nodeId of ["first-node", "replacement-node"]) {
+      const config = {
+        policyVersion: 2,
+        workspaces: { main: { nodeId, remoteRoot: "/agent/canonical" } },
+      };
+      setRuntimeConfigSnapshot({
+        plugins: { entries: { "file-transfer": { enabled: true, config } } },
+      });
+      expect(await prompt("other")).toBeUndefined();
+      const context = (await prompt())?.appendSystemContext;
+      for (const part of [nodeId, "/agent/canonical", "file_fetch", "file_write"]) {
+        expect(context).toContain(part);
       }
-      setRuntimeConfigSnapshot({});
-      expect(await prompt()).toBeUndefined();
-    } finally {
-      clearRuntimeConfigSnapshot();
-      await disposePluginRegistryInstances(registry);
     }
+    setRuntimeConfigSnapshot({});
+    expect(await prompt()).toBeUndefined();
   });
 
   it("does not register runtime hooks or services in discovery mode", () => {
@@ -186,9 +173,6 @@ describe("OpenShell plugin registration lifecycle", () => {
       });
       expect(readBackend()).toEqual(originalBackend);
     } finally {
-      await expect(disposePluginRegistryInstances(registry)).resolves.toMatchObject({
-        failures: [],
-      });
       if (originalRegistry) {
         setActivePluginRegistry(originalRegistry);
       } else {
