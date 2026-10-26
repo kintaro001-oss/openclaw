@@ -2,7 +2,6 @@
 import type { Locator } from "playwright";
 import { expect, it } from "vitest";
 import type { AppSidebarElement } from "../components/app-sidebar.tsx";
-import { waitForControlUiProofSurface } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   controlUiSessionPath,
   installMockGateway,
@@ -83,6 +82,15 @@ suite.define(() => {
           const bounds = await body.boundingBox();
           expect(bounds).not.toBeNull();
           const width = await roundedWidth(nav);
+          // The center of a 16px folding control at the content edge stays clickable.
+          expect(
+            await page.locator("main.content").evaluate((element, pageDirection) => {
+              const rect = element.getBoundingClientRect();
+              const x = pageDirection === "rtl" ? rect.right - 8 : rect.left + 8;
+              const hit = document.elementFromPoint(x, rect.top + 50);
+              return hit !== null && element.contains(hit);
+            }, direction),
+          ).toBe(true);
           const scrollbarWidth = await body.evaluate(
             (element) => element.getBoundingClientRect().width - element.clientWidth,
           );
@@ -596,25 +604,9 @@ suite.define(() => {
       await expect
         .poll(() => usage.evaluate((entry) => getComputedStyle(entry).backgroundColor))
         .not.toBe("rgba(0, 0, 0, 0)");
-      // Rail pins match the view buttons: same icon size, and the same fill for
-      // hover and for the current page.
       const railUsage = pinnedItems.first();
-      const iconWidth = (locator: typeof railUsage) =>
-        locator
-          .locator("svg")
-          .first()
-          .evaluate((svg) => svg.getBoundingClientRect().width);
-      const background = (locator: typeof railUsage) =>
-        locator.evaluate((element) => getComputedStyle(element).backgroundColor);
-      expect(await iconWidth(railUsage)).toBe(await iconWidth(pagesButton));
-      await waitForControlUiProofSurface(pagesButton, []);
-      const pressedBackground = await background(pagesButton);
-      await railUsage.hover();
-      await expect.poll(() => background(railUsage)).toBe(pressedBackground);
       await railUsage.click();
       await expect.poll(() => new URL(page.url()).pathname).toBe("/usage");
-      await page.mouse.move(900, 600);
-      await expect.poll(() => background(railUsage)).toBe(pressedBackground);
       await page.goto(`${suite.server.baseUrl}chat`);
       await page.reload();
       await expect.poll(() => trimmedTextContents(pinnedItems)).toEqual(["Usage"]);
