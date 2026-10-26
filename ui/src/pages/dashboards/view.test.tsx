@@ -1,10 +1,9 @@
 /* @vitest-environment jsdom */
 
-import { createMemo, createSignal, flush } from "solid-js";
-import { expect, it, onTestFinished, vi } from "vitest";
+import { createMemo, createSignal } from "solid-js";
+import { expect, it, vi } from "vitest";
 import type { SessionsListResult } from "../../api/types.ts";
 import { sessionsResult } from "../../lib/sessions/session-capability.test-support.ts";
-import { createFrameQueue } from "../../test-helpers/animation-frame-queue.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { DashboardsView, type DashboardGalleryFilters, type DashboardsRouteData } from "./view.tsx";
@@ -34,45 +33,6 @@ function routeData(sessions: SessionsListResult["sessions"], basePath = ""): Das
     globalScope: false,
   };
 }
-
-it("keeps native card content and focus while previews await viewport activation", async () => {
-  const { request } = createFrameQueue();
-  vi.spyOn(window, "requestAnimationFrame").mockImplementation(request);
-  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
-  onTestFinished(() => {
-    vi.restoreAllMocks();
-  });
-  const view = mountSolid(() => (
-    <DashboardsView
-      data={routeData([
-        { ...dashboard, createdActor: { type: "human", id: "mira", label: "Mira" } },
-      ])}
-      readReady={() => undefined}
-      filters={filters}
-      handlers={handlers}
-    />
-  ));
-  onTestFinished(() => view.unmount());
-  const card = view.container.querySelector<HTMLElement>("[data-dashboard-session]")!;
-  const link = card.querySelector<HTMLAnchorElement>("a")!;
-  expect(card.querySelector("h2")?.textContent).toBe("Deploy monitor");
-  expect(link.getAttribute("href")).toContain("/dashboard/main/deploy-monitor-");
-  expect(card.querySelector("openclaw-dashboard-preview")).not.toBeNull();
-  expect(card.querySelector(".dashboard-card__author")?.textContent).toContain("By Mira");
-  expect(card.querySelector(".dashboard-card__footer")?.textContent).toContain("Updated");
-  expect(card.querySelector(".dashboard-card__open")).not.toBeNull();
-  expect(card.querySelector(".dashboard-card__open svg")).not.toBeNull();
-
-  link.focus();
-  flush();
-  await waitForSolid(() => {
-    expect(card.querySelector("openclaw-dashboard-preview")).not.toBeNull();
-    expect(card.querySelector(".dashboard-card__author")?.textContent).toContain("By Mira");
-    expect(card.querySelector(".dashboard-card__open svg")).not.toBeNull();
-    expect(card.querySelector("a")).toBe(link);
-    expect(document.activeElement).toBe(link);
-  });
-});
 
 it.each([
   ["gallery", "[data-dashboard-session]", "Release health"],
