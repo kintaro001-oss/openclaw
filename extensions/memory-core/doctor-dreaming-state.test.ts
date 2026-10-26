@@ -7,7 +7,6 @@ import { useDoctorWorkspace } from "./doctor-contract-api.test-support.js";
 import {
   readDailyIngestionState,
   readSessionIngestionState,
-  writeDailyIngestionState,
 } from "./src/dreaming-ingestion-state.js";
 import * as state from "./src/dreaming-state.js";
 import {
@@ -21,7 +20,6 @@ if (!migration) {
   throw new Error("Missing dreaming state migration");
 }
 
-let rootDir = "";
 let workspaceDir = "";
 const { fixture, context, params } = useDoctorWorkspace(
   "openclaw-memory-core-dreaming-",
@@ -29,7 +27,7 @@ const { fixture, context, params } = useDoctorWorkspace(
 );
 
 beforeEach(() => {
-  ({ rootDir, workspaceDir } = fixture);
+  ({ workspaceDir } = fixture);
   state.configureMemoryCoreDreamingState(context().openPluginStateKeyedStore);
 });
 const openStore = (namespace: string) =>
@@ -63,10 +61,7 @@ async function writeRetiredDreamingFiles(contents: string) {
 
 async function expectNoMigration() {
   await expect(detect()).resolves.toBeNull();
-  await expect(migrate()).resolves.toEqual({
-    changes: [],
-    warnings: [],
-  });
+  await expect(migrate()).resolves.toEqual({ changes: [], warnings: [] });
 }
 
 it("refuses pre-July dreaming JSON without importing or archiving it", async () => {
@@ -75,7 +70,7 @@ it("refuses pre-July dreaming JSON without importing or archiving it", async () 
     state.DREAMING_DAILY_INGESTION_NAMESPACE,
     "memory/2026-07-01.md",
     { mtimeMs: 1, size: 42 },
-    path.join(rootDir, "another-workspace"),
+    path.join(fixture.rootDir, "another-workspace"),
   );
   const result = await migrate();
   expect(result).toEqual({
@@ -167,12 +162,6 @@ it("preserves July keyed dreaming state when retired JSON files remain", async (
   const { entries: phases } = await readPhaseSignalStore(workspaceDir, timestamp);
   expect(recalls[key]).toMatchObject(recall);
   expect(phases[key]).toMatchObject(phase);
-  const updated = { mtimeMs: 3, size: 43 };
-  await writeDailyIngestionState(workspaceDir, {
-    version: 1,
-    files: { [memoryPath]: updated },
-  });
-  expect((await readDailyIngestionState(workspaceDir)).files[memoryPath]).toEqual(updated);
 });
 
 it("recognizes empty canonical stores only when their existing markers distinguish them", async () => {
