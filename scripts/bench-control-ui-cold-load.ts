@@ -1572,7 +1572,7 @@ try {
     warmStates.push(warmStorage);
     snapshotSaves.push(snapshotSave);
     for (let index = 1; index < bundleSlots.length; index++) {
-      await restoreColdLoadWarmState(page, warmStorage);
+      await restoreColdLoadWarmState(page, warmStorage, warmStates[index - 1]);
       const reloadUrl = page.url();
       await selectComparisonBundle(index, page);
       await page.goto(reloadUrl, { waitUntil: "domcontentloaded" });
@@ -1590,6 +1590,7 @@ try {
         await page.locator(".shell--nav-drawer-open").waitFor({ state: "detached" });
       }
     }
+    await restoreColdLoadWarmState(page, warmStorage, warmStates.at(-1));
   }
   let historyValidatorRequests = 0;
   if (historyValidatorDelayMs > 0) {
@@ -1609,7 +1610,6 @@ try {
       await route.fallback();
     });
   }
-  await selectComparisonBundle(0, page);
   for (let run = 0; run < runs; run++) {
     const bundleIndex = run % bundleSlots.length;
     const layoutCell = layoutCells[Math.floor(run / bundleSlots.length) % layoutCells.length];
@@ -1678,7 +1678,7 @@ try {
     if (layoutCell?.cold ?? firstLoad) {
       await resetColdState(cdp, bundleIndex);
     } else {
-      await restoreColdLoadWarmState(page, reloadStorage!);
+      await restoreColdLoadWarmState(page, reloadStorage!, layoutCell && reloadStorage);
       await selectComparisonBundle(bundleIndex, page);
     }
     runTransfer =
