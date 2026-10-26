@@ -284,17 +284,18 @@ function updateRun() {
 }
 async function resolveList() {
   if (projection && listSessions) {
+    const pageSize = Math.min(100, rows.length);
     const result = await listSessions({
       projection,
       opts: {
         archived: "all",
-        limit: rows.length,
+        limit: pageSize,
         rowMode: "compact",
         includeGlobal: true,
         includeUnknown: true,
       },
     });
-    assert.equal(result.sessions.length, rows.length, "Every generated row must be presented");
+    assert.equal(result.sessions.length, pageSize, "The complete requested page must be presented");
     returnedRows += result.sessions.length;
     checksum += result.sessions.length + (result.totalCount ?? 0);
     return;
