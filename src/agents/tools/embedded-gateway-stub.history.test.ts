@@ -1,6 +1,6 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { Value } from "typebox/value";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import {
   appendTranscriptEvent,
@@ -12,11 +12,7 @@ import * as historyBudget from "../../gateway/chat-history-budget.js";
 import * as historyPages from "../../gateway/server-methods/chat-history-pages.js";
 import { readChatHistoryMessageId } from "../../gateway/session-history-tail.js";
 import { createSessionRowProjection } from "../../gateway/session-row-projection.js";
-import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
-import type { DB as AgentDatabase } from "../../state/openclaw-agent-db.generated.js";
-import { runOpenClawAgentWriteTransaction } from "../../state/openclaw-agent-db.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
-import { drainSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
 import {
   bindEmbeddedSessionRowProjection,
   createEmbeddedCallGateway,
@@ -70,22 +66,10 @@ describe("embedded session history anchors", () => {
   let state: Awaited<ReturnType<typeof createOpenClawTestState>>;
   let projection: Awaited<ReturnType<typeof createSessionRowProjection>> | undefined;
   let unbindProjection: (() => void) | undefined;
-  let resetFailure: Error | undefined;
-
-  beforeAll(async () => {
-    state = await createOpenClawTestState({ prefix: "embedded-anchor-test-" });
-  });
-
-  afterAll(async () => {
-    await state?.cleanup();
-  });
-
   beforeEach(async () => {
-    if (resetFailure) {
-      throw resetFailure;
-    }
     projection = undefined;
     unbindProjection = undefined;
+    state = await createOpenClawTestState({ prefix: "embedded-anchor-test-" });
     setRuntimeConfigSnapshot(config);
     replaceSessionEntrySync(scope, { sessionId: scope.sessionId, updatedAt: Date.now() });
     for (const [index, id] of ["old", "middle", "newest"].entries()) {
@@ -101,31 +85,15 @@ describe("embedded session history anchors", () => {
 
   afterEach(async () => {
     try {
-      if (resetFailure) {
-        return;
-      }
       unbindProjection?.();
       projection?.dispose();
       await projection?.ensureMaterialized();
-      const cleanupScope = { stateDir: state.stateDir, rootPath: state.root };
-      await drainSessionStateForTest(cleanupScope);
-      for (const agentId of ["main", "work"]) {
-        runOpenClawAgentWriteTransaction(
-          ({ db }) => {
-            const kysely = getNodeSqliteKysely<AgentDatabase>(db);
-            // FTS identities lack a foreign key; their trigger clears search content.
-            executeSqliteQuerySync(db, kysely.deleteFrom("session_transcript_fts_rows"));
-            executeSqliteQuerySync(db, kysely.deleteFrom("session_nodes"));
-          },
-          { agentId },
-        );
-      }
-      await drainSessionStateForTest(cleanupScope);
-    } catch (error) {
-      resetFailure = new Error("Embedded history fixture cleanup failed", { cause: error });
-      throw resetFailure;
     } finally {
-      vi.restoreAllMocks();
+      try {
+        await state?.cleanup();
+      } finally {
+        vi.restoreAllMocks();
+      }
     }
   });
 
