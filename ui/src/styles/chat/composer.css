@@ -558,6 +558,7 @@
 }
 
 .agent-chat__voice-activity-bar {
+  position: relative;
   width: 3px;
   height: 18px;
   flex: 0 0 3px;
@@ -565,7 +566,7 @@
   background: color-mix(in srgb, var(--accent) 88%, var(--text));
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 30%, transparent);
   opacity: 0.9;
-  transform: scaleY(calc(0.18 + var(--talk-input-level, 0) * var(--talk-bar-gain, 1) * 0.82));
+  transform: scaleY(var(--talk-bar-scale, 0.18));
   transform-origin: center;
   transition:
     transform 90ms linear,

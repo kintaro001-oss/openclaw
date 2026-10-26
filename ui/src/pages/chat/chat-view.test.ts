@@ -1831,12 +1831,13 @@ describe("chat voice controls", () => {
       const centerBar = visualizer?.querySelector<HTMLElement>(
         ".agent-chat__voice-activity-bar:nth-child(4)",
       );
+      const initialScale = centerBar?.style.getPropertyValue("--talk-bar-scale");
 
       inputLevel.set(0.8);
       flush();
 
       expect(visualizer?.getAttribute("data-level")).toBe("0.8");
-      expect(visualizer?.style.getPropertyValue("--talk-input-level")).toBe("0.8");
+      expect(centerBar?.style.getPropertyValue("--talk-bar-scale")).not.toBe(initialScale);
       expect(visualizer?.querySelector(".agent-chat__voice-activity-bar:nth-child(4)")).toBe(
         centerBar,
       );
