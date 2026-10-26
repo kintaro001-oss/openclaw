@@ -24,28 +24,19 @@ vi.mock("./daemon.js", () => daemonMocks);
 vi.mock("../../node-host/config.js", () => ({
   loadNodeHostConfig: daemonMocks.loadNodeHostConfig,
 }));
-vi.mock("../../node-host/runner.js", () => ({
-  runNodeHost: daemonMocks.runNodeHost,
-}));
+vi.mock("../../node-host/runner.js", () => ({ runNodeHost: daemonMocks.runNodeHost }));
+vi.mock("../../node-host/worker.js", () => ({ runNodeHostWorker: daemonMocks.runNodeHostWorker }));
+vi.mock("../../runtime.js", () => ({ defaultRuntime: daemonMocks.defaultRuntime }));
 
-vi.mock("../../node-host/worker.js", () => ({
-  runNodeHostWorker: daemonMocks.runNodeHostWorker,
-}));
-
-vi.mock("../../runtime.js", () => ({
-  defaultRuntime: daemonMocks.defaultRuntime,
-}));
-
-function createProgram(): Command {
+function run(args: string[]) {
   const program = new Command().exitOverride().configureOutput({
     writeErr: () => undefined,
     writeOut: () => undefined,
   });
   registerNodeCli(program);
-  return program;
+  return program.parseAsync(["node", ...args], { from: "user" });
 }
 
-const run = (args: string[]) => createProgram().parseAsync(["node", ...args], { from: "user" });
 const expectHost = (expected: Record<string, unknown>) =>
   expect(daemonMocks.runNodeHost).toHaveBeenCalledWith(expect.objectContaining(expected));
 const savedConfig = {
