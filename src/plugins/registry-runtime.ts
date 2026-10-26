@@ -3,10 +3,14 @@ import { createChannelIngressDrain } from "../channels/message/ingress-drain.js"
 import { createChannelIngressQueue } from "../channels/message/ingress-queue.js";
 import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { createPluginBlobStore } from "../plugin-state/plugin-blob-store.js";
+import {
+  createPluginBlobStore,
+  type OpenBlobStoreOptions,
+} from "../plugin-state/plugin-blob-store.js";
 import {
   createPluginStateKeyedStore,
   createPluginStateRuntimeStores,
+  type OpenAsyncKeyedStoreOptions,
 } from "../plugin-state/plugin-state-store.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
@@ -17,20 +21,18 @@ import {
   getPluginRecordRegistry,
   getPluginRegistryResourceOwner,
   isPluginRecordActive,
-  isPluginRegistryPreparing,
 } from "./registry-lifecycle.js";
 import {
   createRegisteredChannelRuntimeResolver,
   createScopedPluginChannelRuntime,
 } from "./registry-runtime-channel.js";
 import { createPluginRuntimeFacades } from "./registry-runtime-facades.js";
+import { createPluginSystemRuntime } from "./registry-runtime-system.js";
 import type { PluginRegistryState } from "./registry-state.js";
 import type { PluginRecord, PluginRegistry } from "./registry-types.js";
 import {
   ExpiredPluginRegistryScopeError,
-  getGatewayContextResolver,
   getPluginRuntimeGatewayRequestScope,
-  withPluginRuntimeGatewayRequestScope,
   withPluginRuntimePluginScope,
   withPluginRuntimeRegistryScope,
 } from "./runtime/gateway-request-scope.js";
@@ -193,11 +195,11 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
             : capabilities?.filter((capability) => capability !== "native-subagent-profiles-v1");
         }
         if (prop === "state") {
-          const baseState: PluginRuntime["state"] = getRuntimeProperty();
+          const baseState = getRuntimeProperty();
           return {
             ...baseState,
-            openBlobStore: (options) => {
-              return createPluginBlobStore(pluginId, options);
+            openBlobStore: <TMetadata>(options: OpenBlobStoreOptions) => {
+              return createPluginBlobStore<TMetadata>(pluginId, options);
             },
             ...createPluginStateRuntimeStores(pluginId, assertRuntimeCurrent, () =>
               capturePluginStateOperationModuleSource(
@@ -205,12 +207,12 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
                 assertRuntimeCurrent,
               ),
             ),
-            openKeyedStore: (options) => {
+            openKeyedStore: <T>(options: OpenAsyncKeyedStoreOptions) => {
               // Bind storage and operation code to the same admitted instance before yielding.
               if (options.retention === "retained") {
                 assertRuntimeCurrent();
               }
-              return createPluginStateKeyedStore(
+              return createPluginStateKeyedStore<T>(
                 record.id,
                 options,
                 assertRuntimeCurrent,
@@ -220,18 +222,33 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
                 ),
               );
             },
-            openChannelIngressQueue: (options) => {
+            openChannelIngressQueue: <TPayload, TMetadata = unknown, TCompletedMetadata = unknown>(
+              options?: Omit<Parameters<typeof createChannelIngressQueue>[0], "channelId">,
+            ) => {
               const stateDir = options?.stateDir ?? baseState.resolveStateDir();
-              return createChannelIngressQueue(
+              return createChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>(
                 { ...options, channelId: pluginId, stateDir },
                 assertRuntimeCurrent,
               );
             },
-            openChannelIngressDrain: (options) => {
+            openChannelIngressDrain: <TPayload, TMetadata = unknown, TCompletedMetadata = unknown>(
+              options: Omit<
+                Parameters<
+                  typeof createChannelIngressDrain<TPayload, TMetadata, TCompletedMetadata>
+                >[0],
+                "queue"
+              > & {
+                queue?: ReturnType<
+                  typeof createChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>
+                >;
+                accountId?: string;
+                stateDir?: string;
+              },
+            ) => {
               const stateDir = options.stateDir ?? baseState.resolveStateDir();
               const queue =
                 options.queue ??
-                createChannelIngressQueue(
+                createChannelIngressQueue<TPayload, TMetadata, TCompletedMetadata>(
                   { channelId: pluginId, accountId: options.accountId, stateDir },
                   assertRuntimeCurrent,
                 );
@@ -241,7 +258,7 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
                 stateDir: _stateDir,
                 ...drainOptions
               } = options;
-              return createChannelIngressDrain({
+              return createChannelIngressDrain<TPayload, TMetadata, TCompletedMetadata>({
                 ...drainOptions,
                 queue,
               });
@@ -267,56 +284,14 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
           } satisfies PluginRuntime["config"];
         }
         if (prop === "system") {
-          const system: PluginRuntime["system"] = getRuntimeProperty();
-          const route = <T>(run: () => T): T => {
-            assertRuntimeCurrent();
-            if (isPluginRegistryPreparing(registry) && !isPluginRecordActive(registry, record)) {
-              throw new Error(
-                `Plugin "${pluginId}" cannot route system events during replacement preparation.`,
-              );
-            }
-            const authority = capturePluginLifecycleAuthority(currentRegistry(), record, {
-              scopedRuntime: registryParams.activateGlobalSideEffects === false,
-              registration: true,
-              admittedRuntime: true,
-            });
-            const resolveGatewayContext = getGatewayContextResolver(registryParams.runtime);
-            const context = resolveGatewayContext?.();
-            const assertCurrent = () => {
-              if (!authority?.()) {
-                throw new Error(`Plugin "${pluginId}" system owner is no longer active.`);
-              }
-              if (
-                resolveGatewayContext &&
-                (getGatewayContextResolver(registryParams.runtime) !== resolveGatewayContext ||
-                  !context ||
-                  resolveGatewayContext() !== context)
-              ) {
-                throw new Error(`Plugin "${pluginId}" Gateway owner is no longer active.`);
-              }
-            };
-            assertCurrent();
-            return runWithPluginScope(() =>
-              withPluginRuntimeGatewayRequestScope(
-                {
-                  ...getPluginRuntimeGatewayRequestScope(),
-                  isWebchatConnect: () => false,
-                  resolveGatewayContext,
-                  assertSystemOwnerCurrent: assertCurrent,
-                },
-                run,
-              ),
-            );
-          };
-          return {
-            ...system,
-            captureSessionEventTarget: (...args) =>
-              route(() => system.captureSessionEventTarget(...args)),
-            enqueueSessionEvent: (...args) => route(() => system.enqueueSessionEvent(...args)),
-            enqueueSystemEvent: (...args) => route(() => system.enqueueSystemEvent(...args)),
-            runCommandWithTimeout: (...args) =>
-              runWithPluginScope(() => system.runCommandWithTimeout(...args)),
-          } satisfies PluginRuntime["system"];
+          return createPluginSystemRuntime({
+            state,
+            record,
+            system: getRuntimeProperty(),
+            currentRegistry,
+            assertRuntimeCurrent,
+            runWithPluginScope,
+          });
         }
         if (prop === "channel") {
           const channel = channelRuntime.resolve(record);
@@ -621,15 +596,19 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
             // SAFETY: cloning the prototype and every own descriptor preserves the complete agent surface.
           ) as PluginRuntime["agent"];
           const overrides = {
-            resolveThinkingDefault: (params) =>
+            resolveThinkingDefault: (params: Parameters<typeof agent.resolveThinkingDefault>[0]) =>
               invokeSelectedRuntime(() => agent.resolveThinkingDefault(params)),
-            resolveCliBackendDispatchEligibility: (params) =>
-              invokeSelectedRuntime(() => agent.resolveCliBackendDispatchEligibility(params)),
-            resolveCliBackendDispatchEligibilityAsync: (params) =>
+            resolveCliBackendDispatchEligibility: (
+              params: Parameters<typeof agent.resolveCliBackendDispatchEligibility>[0],
+            ) => invokeSelectedRuntime(() => agent.resolveCliBackendDispatchEligibility(params)),
+            resolveCliBackendDispatchEligibilityAsync: (
+              params: Parameters<typeof agent.resolveCliBackendDispatchEligibilityAsync>[0],
+            ) =>
               invokeSelectedRuntime(() => agent.resolveCliBackendDispatchEligibilityAsync(params)),
-            resolveSessionCatalogCreateTarget: (params) =>
-              invokeSelectedRuntime(() => agent.resolveSessionCatalogCreateTarget(params)),
-            resolveThinkingPolicy: (params) =>
+            resolveSessionCatalogCreateTarget: (
+              params: Parameters<typeof agent.resolveSessionCatalogCreateTarget>[0],
+            ) => invokeSelectedRuntime(() => agent.resolveSessionCatalogCreateTarget(params)),
+            resolveThinkingPolicy: (params: Parameters<typeof agent.resolveThinkingPolicy>[0]) =>
               invokeSelectedRuntime(() => agent.resolveThinkingPolicy(params)),
             runCommandFromIngress,
             runEmbeddedAgent,

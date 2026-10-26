@@ -4,7 +4,8 @@ import { canonicalizePath } from "../../agents/utils/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { WorkshopReviewNotFoundError } from "../../skills/workshop/review-undo.js";
 import { resolveWorkshopSkillsDir } from "../../skills/workshop/skills-root.js";
-import { skillsHandlers } from "./skills.js";
+import { skillsRetiredHandlers } from "./skills-retired.js";
+import { skillsWorkshopHandlers } from "./skills-workshop.js";
 import { callGatewayHandler } from "./skills.test-helpers.js";
 
 const library = vi.hoisted(() => ({
@@ -38,7 +39,7 @@ const config: OpenClawConfig = {
 };
 const context = { getRuntimeConfig: () => config };
 const call = (method: string, params: Record<string, unknown>) =>
-  callGatewayHandler(skillsHandlers, method, params, {
+  callGatewayHandler({ ...skillsWorkshopHandlers, ...skillsRetiredHandlers }, method, params, {
     context,
   });
 const expectInvalid = (result: Awaited<ReturnType<typeof call>>, message?: string) =>
@@ -121,7 +122,7 @@ describe("skills.workshop gateway methods", () => {
     undoWorkshopReview.mockImplementation(revokeThenCommit);
 
     await expect(
-      callGatewayHandler(skillsHandlers, method, params, {
+      callGatewayHandler(skillsWorkshopHandlers, method, params, {
         client: client as never,
         context,
       }),

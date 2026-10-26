@@ -6,13 +6,12 @@ import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js"
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createCanonicalFixtureSkill } from "../../skills/test-support/test-helpers.js";
 import type { SkillEntry } from "../../skills/types.js";
-import { skillsHandlers } from "./skills.js";
+import { skillsFilesHandlers } from "./skills-files.js";
 import { callGatewayHandler } from "./skills.test-helpers.js";
 
 const { discovered } = vi.hoisted(() => ({ discovered: vi.fn() }));
 // mock-isolation: Admit a fixed catalog while exercising real file reads, without discovery workers.
-vi.mock("../../skills/loading/workspace-skill-loader.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../skills/loading/workspace-skill-loader.js")>()),
+vi.mock("../../skills/loading/workspace-skill-loader.js", () => ({
   prepareWorkspaceSkillEntries: discovered,
 }));
 
@@ -27,7 +26,7 @@ const content =
 
 function read(requestPath = skillPath, agentId = "main") {
   return callGatewayHandler(
-    skillsHandlers,
+    skillsFilesHandlers,
     "skills.files.get",
     { agentId, path: requestPath },
     { context: { getRuntimeConfig: () => config } },
