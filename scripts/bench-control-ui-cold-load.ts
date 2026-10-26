@@ -697,7 +697,7 @@ async function selectComparisonBundle(index: number, page?: Page) {
       gateway.setServerBuildId(id);
     }, nextBuildId);
     // Retire lazy imports from the old page before its assets leave the served root.
-    await page.goto(coldResetUrl);
+    await page.goto("about:blank");
   }
   if (gatewayHttpServer) {
     await gatewayHttpServer.selectBuild(bundleSlots[index]!);
@@ -1277,11 +1277,6 @@ try {
       await route.fallback();
     });
   }
-  if (firstLoad || values["layout-matrix"] || comparisonBundleDirs.length) {
-    await page.route(coldResetUrl, (route) =>
-      route.fulfill({ body: "", contentType: "text/html" }),
-    );
-  }
   async function resetColdState(cdp: CDPSession, bundleIndex: number) {
     // Retire pagehide writers before clearing the measured origin's persistent state.
     await page.goto("about:blank");
@@ -1292,7 +1287,11 @@ try {
     await cdp.send("Network.clearBrowserCache");
     await selectComparisonBundle(bundleIndex);
     // The empty same-origin document seeds only the existing mock's build identity.
+    await page.route(coldResetUrl, (route) =>
+      route.fulfill({ body: "", contentType: "text/html" }),
+    );
     await page.goto(coldResetUrl);
+    await page.unroute(coldResetUrl);
     await page.evaluate((id) => {
       localStorage.clear();
       sessionStorage.clear();
