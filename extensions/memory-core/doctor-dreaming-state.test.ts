@@ -4,17 +4,16 @@ import path from "node:path";
 import { beforeEach, expect, it } from "vitest";
 import { stateMigrations } from "./doctor-contract-api.js";
 import { useDoctorWorkspace } from "./doctor-contract-api.test-support.js";
-import {
-  readDailyIngestionState,
-  readSessionIngestionState,
-} from "./src/dreaming-ingestion-state.js";
 import * as state from "./src/dreaming-state.js";
-import {
-  readPhaseSignalStore,
-  readStore as readRecallStore,
-} from "./src/short-term-promotion-store.js";
 import { resetMemoryCoreDreamingStateForTests } from "./src/test-helpers.js";
 
+const namespaces = [
+  state.DREAMING_DAILY_INGESTION_NAMESPACE,
+  state.DREAMING_SESSION_INGESTION_FILES_NAMESPACE,
+  state.DREAMING_SESSION_INGESTION_SEEN_NAMESPACE,
+  state.SHORT_TERM_RECALL_NAMESPACE,
+  state.SHORT_TERM_PHASE_SIGNAL_NAMESPACE,
+];
 const migration = stateMigrations.find((entry) => entry.id === "memory-core-dreams-json-to-sqlite");
 if (!migration) {
   throw new Error("Missing dreaming state migration");
@@ -83,85 +82,43 @@ it("refuses pre-July dreaming JSON without importing or archiving it", async () 
     preview: result.warnings.map((warning) => `- ${warning}`),
   });
   await retired.expectUnchanged();
-  expect(await readDailyIngestionState(workspaceDir)).toEqual({ version: 1, files: {} });
-  expect(await readSessionIngestionState(workspaceDir)).toEqual({
-    version: 3,
-    files: {},
-    seenMessages: {},
-  });
+  for (const namespace of namespaces) {
+    expect(await state.readMemoryCoreWorkspaceEntries({ namespace, workspaceDir })).toEqual([]);
+  }
 });
 
 it("preserves July keyed dreaming state when retired JSON files remain", async () => {
   const retired = await writeRetiredDreamingFiles("{unread retired JSON");
-  const timestamp = "2026-07-01T12:00:00.000Z";
-  const memoryPath = "memory/2026-07-01.md";
-  const key = `memory:${memoryPath}:1:1`;
-  const sessionKey = "main/session.jsonl";
-  const daily = { mtimeMs: 1, size: 42 };
-  const session = {
-    mtimeMs: 2,
-    size: 91,
-    contentHash: "july-hash",
-    lineCount: 3,
-    lastContentLine: 3,
-  };
-  const recall = {
-    key,
-    path: memoryPath,
-    startLine: 1,
-    endLine: 1,
-    source: "memory",
-    snippet: "Move backups to S3 Glacier.",
-    recallCount: 1,
-    totalScore: 0.9,
-    maxScore: 0.9,
-    queryHashes: ["hash-a"],
-    firstRecalledAt: timestamp,
-    lastRecalledAt: timestamp,
-  };
-  const phase = { key, lightHits: 1, remHits: 2, lastLightAt: timestamp, lastRemAt: timestamp };
-  const fixtures = [
-    [state.DREAMING_DAILY_INGESTION_NAMESPACE, memoryPath, daily],
-    [state.DREAMING_SESSION_INGESTION_FILES_NAMESPACE, sessionKey, session],
-    [
-      state.DREAMING_SESSION_INGESTION_SEEN_NAMESPACE,
-      `${sessionKey}:0`,
-      { scope: sessionKey, index: 0, hashes: ["seen-a", "seen-b"] },
-    ],
-    [state.SHORT_TERM_RECALL_NAMESPACE, key, recall],
-    [state.SHORT_TERM_PHASE_SIGNAL_NAMESPACE, key, phase],
-  ] satisfies Array<[string, string, object]>;
   // Persist the v2026.7.1-beta.1 envelope independently of today's workspace writer.
+  // Doctor checks row presence; payload decoding belongs to the ingestion and promotion suites.
   const normalizedWorkspace = path.resolve(workspaceDir).replace(/\\/g, "/");
   const workspaceKey = createHash("sha256")
     .update(process.platform === "win32" ? normalizedWorkspace.toLowerCase() : normalizedWorkspace)
     .digest("hex");
   const stores = [];
-  for (const [namespace, id, value] of fixtures) {
+  for (const namespace of namespaces) {
     const store = openStore(namespace);
-    await store.register(`${workspaceKey}:${createHash("sha256").update(id).digest("hex")}`, {
-      version: 1,
-      workspaceKey,
-      workspaceDir: path.resolve(workspaceDir),
-      key: id,
-      value,
-    });
+    await store.register(
+      `${workspaceKey}:${createHash("sha256").update(namespace).digest("hex")}`,
+      {
+        version: 1,
+        workspaceKey,
+        workspaceDir: path.resolve(workspaceDir),
+        key: namespace,
+        value: { checkpoint: namespace },
+      },
+    );
     stores.push(store);
   }
   const before = await Promise.all(stores.map((store) => store.entries()));
   await expectNoMigration();
   expect(await Promise.all(stores.map((store) => store.entries()))).toEqual(before);
   await retired.expectUnchanged();
-  expect((await readDailyIngestionState(workspaceDir)).files[memoryPath]).toEqual(daily);
-  expect(await readSessionIngestionState(workspaceDir)).toEqual({
-    version: 3,
-    files: { [sessionKey]: session },
-    seenMessages: { [sessionKey]: ["seen-a", "seen-b"] },
-  });
-  const { entries: recalls } = await readRecallStore(workspaceDir, timestamp);
-  const { entries: phases } = await readPhaseSignalStore(workspaceDir, timestamp);
-  expect(recalls[key]).toMatchObject(recall);
-  expect(phases[key]).toMatchObject(phase);
+  for (const namespace of namespaces) {
+    expect(await state.readMemoryCoreWorkspaceEntries({ namespace, workspaceDir })).toEqual([
+      { key: namespace, value: { checkpoint: namespace } },
+    ]);
+  }
 });
 
 it("recognizes empty canonical stores only when their existing markers distinguish them", async () => {
