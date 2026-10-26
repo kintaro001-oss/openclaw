@@ -49,6 +49,17 @@ export function registerCliReplyCompletionTests({
   ) => Partial<RunCliAgentParams>;
   readTranscriptMessages: (sessionTarget: SessionTranscriptRuntimeTarget) => Promise<unknown[]>;
 }) {
+  type SpawnInput = Parameters<Parameters<typeof supervisorSpawnMock.mockImplementationOnce>[0]>[0];
+  const captureMessage = (input: SpawnInput, args: Record<string, unknown>, result: unknown) =>
+    completeToolCall(
+      { captureKey: input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY ?? "", toolName: "message", args },
+      result,
+    );
+  const emitResult = (input: SpawnInput, result = SILENT_REPLY_TOKEN) =>
+    input.onStdout?.(
+      `${JSON.stringify({ type: "result", session_id: "claude-session", result })}\n`,
+    );
+
   it("recognizes a WhatsApp LID media delivery before NO_REPLY", async () => {
     const { createChannelHandler } = await import("../infra/outbound/deliver-channel.js");
     const { annotateSourceDelivery } =
@@ -174,14 +185,7 @@ export function registerCliReplyCompletionTests({
         false,
       );
       deliveredPayload = result.payload;
-      completeToolCall(
-        {
-          captureKey: input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY ?? "",
-          toolName: "message",
-          args,
-        },
-        { details: result.payload },
-      );
+      captureMessage(input, args, { details: result.payload });
       input.onStdout?.(`${JSON.stringify({ type: "result", result: SILENT_REPLY_TOKEN })}\n`);
       return makeManagedRun();
     });
@@ -230,18 +234,15 @@ export function registerCliReplyCompletionTests({
     "does not replay delivery and resumes valid history after %s",
     async (failure) => {
       supervisorSpawnMock.mockImplementationOnce(async (input) => {
-        completeToolCall(
+        captureMessage(
+          input,
           {
-            captureKey: input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY ?? "",
-            toolName: "message",
-            args: {
-              action: "send",
-              channel: "telegram",
-              target: "chat123",
-              message: "progress before interruption",
-              mediaUrl: "https://example.com/done.png",
-              final: false,
-            },
+            action: "send",
+            channel: "telegram",
+            target: "chat123",
+            message: "progress before interruption",
+            mediaUrl: "https://example.com/done.png",
+            final: false,
           },
           { status: "sent" },
         );
@@ -329,35 +330,22 @@ export function registerCliReplyCompletionTests({
   );
 
   it.each([
-    {
-      name: "source progress",
-      expected: "success",
-      text: SILENT_REPLY_TOKEN,
-    },
-    {
-      name: "empty source progress",
-      expected: "error",
-      text: "",
-    },
+    { name: "source progress", expected: "success", text: SILENT_REPLY_TOKEN },
+    { name: "empty source progress", expected: "error", text: "" },
   ] as const)("settles $name without replaying a send", async ({ expected, text }) => {
     supervisorSpawnMock.mockImplementationOnce(async (input) => {
-      completeToolCall(
+      captureMessage(
+        input,
         {
-          captureKey: input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY ?? "",
-          toolName: "message",
-          args: {
-            action: "send",
-            channel: "telegram",
-            target: "chat123",
-            message: "sent without a terminal reply",
-            final: false,
-          },
+          action: "send",
+          channel: "telegram",
+          target: "chat123",
+          message: "sent without a terminal reply",
+          final: false,
         },
         { status: "sent" },
       );
-      input.onStdout?.(
-        `${JSON.stringify({ type: "result", session_id: "claude-session", result: text })}\n`,
-      );
+      emitResult(input, text);
       return makeManagedRun();
     });
     const context = createContext({
@@ -428,17 +416,8 @@ export function registerCliReplyCompletionTests({
         sourceReplySink: "internal-ui",
         sourceReplyTranscriptOwner: true,
       });
-      completeToolCall(
-        {
-          captureKey: input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY ?? "",
-          toolName: "message",
-          args,
-        },
-        toolResult,
-      );
-      input.onStdout?.(
-        `${JSON.stringify({ type: "result", session_id: "claude-session", result: SILENT_REPLY_TOKEN })}\n`,
-      );
+      captureMessage(input, args, toolResult);
+      emitResult(input);
       return makeManagedRun();
     });
 

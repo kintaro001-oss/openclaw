@@ -77,6 +77,23 @@ function prepared(runtimeId?: string): UtilityCompletionRuntimeParams {
   };
 }
 
+function runtimeLease(
+  snapshot: ReturnType<typeof createModelRuntimeChoiceOwnerFixture>,
+  release = async () => {},
+) {
+  return {
+    snapshot,
+    pluginGeneration: {
+      remoteCatalog: null,
+      pluginMetadataSnapshot: snapshot.metadataSnapshot,
+      inlineProviderModels: [],
+      configuredCatalogEntries: [],
+      pluginRegistry: snapshot.pluginRegistry,
+    },
+    [Symbol.asyncDispose]: release,
+  };
+}
+
 it.each(["missing", "api", "fallback", "native", "cooldown"] as const)(
   "preflights utility credentials from the published Gateway facts: %s",
   async (credential) => {
@@ -126,17 +143,7 @@ it.each(["missing", "api", "fallback", "native", "cooldown"] as const)(
     bindPreparedModelRuntimeAuth(snapshot, { store });
     const release = vi.fn(async () => {});
     using acquire = vi.spyOn(preparedRuntime, "acquirePreparedModelRuntimeSnapshot");
-    acquire.mockResolvedValue({
-      snapshot,
-      pluginGeneration: {
-        remoteCatalog: null,
-        pluginMetadataSnapshot: snapshot.metadataSnapshot,
-        inlineProviderModels: [],
-        configuredCatalogEntries: [],
-        pluginRegistry: snapshot.pluginRegistry,
-      },
-      [Symbol.asyncDispose]: release,
-    });
+    acquire.mockResolvedValue(runtimeLease(snapshot, release));
     await withEnvAsync(
       { ANTHROPIC_API_KEY: undefined, ANTHROPIC_OAUTH_TOKEN: undefined },
       async () => {
@@ -192,17 +199,7 @@ it("keeps utility auth available when the catalog contains another provider's tr
           modelCatalog: { entries, routeVariants: entries },
         });
         bindPreparedModelRuntimeAuth(snapshot, { store: { version: 1, profiles: {} } });
-        acquire.mockResolvedValue({
-          snapshot,
-          pluginGeneration: {
-            remoteCatalog: null,
-            pluginMetadataSnapshot: snapshot.metadataSnapshot,
-            inlineProviderModels: [],
-            configuredCatalogEntries: [],
-            pluginRegistry: snapshot.pluginRegistry,
-          },
-          [Symbol.asyncDispose]: async () => {},
-        });
+        acquire.mockResolvedValue(runtimeLease(snapshot));
         expect(await hasAvailableUtilityCompletionAuth(model)).toBe(true);
       }
     },

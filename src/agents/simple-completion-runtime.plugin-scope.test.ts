@@ -51,6 +51,16 @@ import {
 
 const tempRoots = createSyncSuiteTempRootTracker("openclaw-simple-completion-plugin-scope");
 type PluginFixture = ReturnType<typeof createColdPluginFixture>;
+function pluginConfig(
+  plugins: PluginFixture[],
+  slots: NonNullable<OpenClawConfig["plugins"]>["slots"] = { memory: "none" },
+) {
+  return {
+    load: { paths: plugins.map((plugin) => plugin.rootDir) },
+    slots,
+    entries: Object.fromEntries(plugins.map((plugin) => [plugin.pluginId, { enabled: true }])),
+  };
+}
 function fixtureEnv(tempRoot: string) {
   return {
     ...createColdPluginHermeticEnv(tempRoot, { bundledPluginsDir: tempRoots.makeTempDir() }),
@@ -64,7 +74,6 @@ function fixtureConfig(
   provider: Partial<ModelProviderConfig> = {},
   others: PluginFixture[] = [],
 ): OpenClawConfig {
-  const plugins = [fixture, ...others];
   return completionConfig(
     fixture.providerId,
     {
@@ -77,11 +86,7 @@ function fixtureConfig(
       agents: {
         defaults: { workspace: fixture.rootDir, model: `${fixture.providerId}/selected-model` },
       },
-      plugins: {
-        load: { paths: plugins.map((plugin) => plugin.rootDir) },
-        slots: { memory: "none" },
-        entries: Object.fromEntries(plugins.map((plugin) => [plugin.pluginId, { enabled: true }])),
-      },
+      plugins: pluginConfig([fixture, ...others]),
     },
   );
 }
@@ -438,22 +443,10 @@ module.exports = {
     agents: {
       defaults: { model: `${selected.providerId}/primary-model@work` },
     },
-    plugins: {
-      load: {
-        paths: [
-          selected.rootDir,
-          unrelated.rootDir,
-          ...agentOwners.map((plugin) => plugin.rootDir),
-        ],
-      },
-      slots: { memory: "expensive-memory", contextEngine: "expensive-context" },
-      entries: {
-        [selected.pluginId]: { enabled: true },
-        [unrelated.pluginId]: { enabled: true },
-        "expensive-memory": { enabled: true },
-        "expensive-context": { enabled: true },
-      },
-    },
+    plugins: pluginConfig([selected, unrelated, ...agentOwners], {
+      memory: "expensive-memory",
+      contextEngine: "expensive-context",
+    }),
   } satisfies OpenClawConfig;
   let preparedRuntime: PreparedModelRuntimeSnapshot | undefined;
   const modelResolver: SimpleCompletionModelResolver = vi.fn(
