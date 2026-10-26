@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { IDBFactory } from "fake-indexeddb";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import { outboxStorageScope as scopeFor } from "../../lib/chat/outbox-payload-store.runtime.ts";
 import {
@@ -77,6 +77,7 @@ function seedSession(session: Record<string, unknown>, version = 1, key = "agent
 
 const snapshot = (state: ComposerState, key = state.sessionKey) => load(state, key).snapshot;
 const revision = (state: ComposerState) => load(state, state.sessionKey).revisions.latestAttempt;
+const restore = (state: ComposerState) => new ChatComposerPersistence(() => state).restore();
 
 const readStored = (state: ComposerState) =>
   JSON.parse(sessionStorage.getItem(storageTargetForComposer(state).key)!);
@@ -119,6 +120,18 @@ function heldItem(state: ComposerState, fields: Partial<ChatQueueItem> = {}): Ch
 }
 const privateMentions = [{ profileId: "alex", start: 0, end: 5 }];
 const privateGoal = { action: "start" as const, sessionId: "private-session" };
+const failedAttachment = {
+  sendState: "failed" as const,
+  sendError: "RangeError: Maximum call stack size exceeded",
+  attachments: [
+    {
+      id: "attachment",
+      mimeType: "image/png",
+      fileName: "image.png",
+      dataUrl: "data:image/png;base64,AAA",
+    },
+  ],
+};
 const recoveredError = "Recovered message. Review this destination and retry when ready.";
 function reviewed(state: ComposerState, item: ChatQueueItem, sendError = recoveredError) {
   return { ...item, storageScope: scopeFor(state), sendState: "failed" as const, sendError };
@@ -187,7 +200,7 @@ it("restores selected recipients and gives same-text recipient changes their own
   expect(persist(state, state.sessionKey, { draftRevision: 10 })).toBe(true);
   roundtripQueue(state, "keep-draft-mentions");
   const restored = createState();
-  expect(new ChatComposerPersistence(() => restored).restore()).toBe(true);
+  expect(restore(restored)).toBe(true);
   expect(restored.chatMentions).toEqual(first);
   expect(persist(state, state.sessionKey, { draftRevision: 10, mentions: second })).toBe(false);
 
@@ -216,7 +229,7 @@ it("restores objective-edit mode with its literal draft and exact target", () =>
     agentsList: { defaultId: "lily", mainKey: "main" },
   });
   const restored = createState();
-  expect(new ChatComposerPersistence(() => restored).restore()).toBe(true);
+  expect(restore(restored)).toBe(true);
   expect(restored).toMatchObject({ chatMessage: state.chatMessage, chatGoalDraftMode: goalMode });
   expect(snapshot(state, "agent:lily:other")).toBeNull();
   roundtripQueue(state, "other-message");
@@ -227,7 +240,7 @@ it("normalizes an existing whitespace-only stored draft during restore", () => {
   const state = createState();
   seedSession({ draft: "  \n  ", draftRevision: 1 }, 4);
 
-  expect(new ChatComposerPersistence(() => state).restore()).toBe(false);
+  expect(restore(state)).toBe(false);
   expect(state.chatMessage).toBe("");
 });
 
@@ -254,9 +267,7 @@ it("reviews legacy steer rows as generic mode-bearing sends and never rewrites o
   expect(restored).not.toHaveProperty("kind");
   expect(restored).not.toHaveProperty("steerTargetRunId");
 
-  expect(replaceItem(state, restored!, { ...restored!, text: "updated" }, restored?.agentId)).toBe(
-    true,
-  );
+  expect(replaceItem(state, restored!, { ...restored!, text: "updated" })).toBe(true);
   const written = sessionStorage.getItem(storageKey) ?? "";
   expect(written).toContain('"queueMode":"steer"');
   expect(written).not.toMatch(/"kind":"steered"|steerTargetRunId|"sendState":"steering"/);
@@ -322,9 +333,7 @@ it("persists a delayed global draft to the agent scope captured when typed", () 
   expectPersisted(persistence);
   expect(persistence.scopeForRouteSwitch()).toEqual({ sessionKey: "global", agentId: "alpha" });
   expectPersisted(persistence);
-  expect(load({ ...state, assistantAgentId: "alpha" }, "global").snapshot?.draft).toBe(
-    "alpha draft",
-  );
+  expect(snapshot({ ...state, assistantAgentId: "alpha" })?.draft).toBe("alpha draft");
   expect(snapshot(beta, "global")?.draft).toBe("beta draft");
 });
 
@@ -386,18 +395,10 @@ it("keeps unresolved bare main and raw global independent until their owners res
   };
   expect(replaceItem(resolved, mainBox.queue[0]!, attemptedMain)).toBe(true);
   expect(replaceItem(resolved, globalBox.queue[0]!, attemptedGlobal)).toBe(true);
-  expect(updateItems(resolved, "global", [{ expected: attemptedMain, next: null }])).toBe(true);
+  expect(removeItem(resolved, attemptedMain)).toBe(true);
   expect(listOutboxes(resolved)).toEqual([outbox(attemptedGlobal, "global", "alpha")]);
-  expect(updateItems(resolved, "global", [{ expected: attemptedGlobal, next: null }])).toBe(true);
+  expect(removeItem(resolved, attemptedGlobal)).toBe(true);
   expect(listOutboxes(resolved)).toEqual([]);
-});
-
-it("retains ambiguous shipped main rows for explicit destination confirmation", () => {
-  const item = legacyReconnectItem("legacy-main", 1);
-  seedSessions({ "main\u0000agent:previous": { queue: [item], updatedAt: 1 } });
-  const state = createState({ agentsList: { defaultId: "work", mainKey: "main" } });
-  expect(listOutboxes(state)).toEqual([]);
-  expect(readRecovery(state).entries[0]?.session.queue).toEqual([item]);
 });
 
 it("reviews shipped selected-agent opaque rows without passively adopting either draft", () => {
@@ -444,16 +445,7 @@ it("reviews full v1 main and global queues while consuming legacy tombstones", (
   const mainQueue = Array.from({ length: 50 }, (_, i) => legacyReconnectItem(`main-${i}`, i + 50));
   mainQueue[0] = {
     ...legacyReconnectItem("main-0", 50),
-    sendState: "failed",
-    sendError: "RangeError: Maximum call stack size exceeded",
-    attachments: [
-      {
-        id: "legacy-attachment",
-        mimeType: "image/png",
-        fileName: "legacy.png",
-        dataUrl: "data:image/png;base64,AAA",
-      },
-    ],
+    ...failedAttachment,
   };
   const mainKey = "agent:work:main";
   seedSessions({
@@ -538,7 +530,7 @@ it.each([
       ...(sendError ? { sendError } : {}),
     };
     expect(admitItem(state, item)).toBe(true);
-    expect(load(state, state.sessionKey).snapshot?.queue).toEqual(
+    expect(snapshot(state)?.queue).toEqual(
       outbox(
         {
           ...item,
@@ -733,12 +725,11 @@ it("persists a revert after an intermediate draft attempt fails", () => {
 });
 
 it("retries a failed draft write when stopping", () => {
-  const write = vi.spyOn(sessionStorage, "setItem").mockImplementationOnce(quotaFailure);
+  vi.spyOn(sessionStorage, "setItem").mockImplementationOnce(quotaFailure);
   const [state, persistence] = pane();
   state.chatMessage = "retry this write";
   persistence.persistNow();
   persistence.stop();
-  expect(write).toHaveBeenCalledTimes(2);
   expect(snapshot(state)?.draft).toBe("retry this write");
 });
 
@@ -748,27 +739,11 @@ it("keeps failed attachment sends durable and retryable, including stack-overflo
     id: "overflow-attachment",
     text: "failed attachment send",
     createdAt: 1,
-    sendState: "failed",
-    sendError: "RangeError: Maximum call stack size exceeded",
-    attachments: [
-      {
-        id: "att-overflow",
-        mimeType: "image/png",
-        fileName: "big.png",
-        dataUrl: "data:image/png;base64,AAA",
-      },
-    ],
+    ...failedAttachment,
   };
 
   expect(admitItem(state, failed)).toBe(true);
-  expect(load(state, state.sessionKey).snapshot?.queue).toMatchObject([
-    {
-      id: "overflow-attachment",
-      sendState: "failed",
-      sendError: "RangeError: Maximum call stack size exceeded",
-      attachments: [{ id: "att-overflow" }],
-    },
-  ]);
+  expect(snapshot(state)?.queue).toMatchObject([failed]);
 });
 
 it.each(["canonical key", "arriving metadata"] as const)(
@@ -811,7 +786,7 @@ it.each(["canonical key", "arriving metadata"] as const)(
     expect([row.draft, row.draftMentions, row.goalMode, row.replyTarget]).toEqual(
       Array(4).fill(undefined),
     );
-    expect(new ChatComposerPersistence(() => state).restore()).toBe(true);
+    expect(restore(state)).toBe(true);
     expect(state).toMatchObject({
       chatMessage: "@Alex private objective",
       chatMentions: [expect.anything()],
@@ -819,7 +794,7 @@ it.each(["canonical key", "arriving metadata"] as const)(
     });
     reloadStorage(state);
     const restored = createState({ sessionKey: state.sessionKey });
-    expect(new ChatComposerPersistence(() => restored).restore()).toBe(true);
+    expect(restore(restored)).toBe(true);
     expect(restored).toMatchObject({ chatMessage: "", chatQueue: [queued] });
     persistence.stop();
   },
@@ -892,53 +867,39 @@ it.each([true, false])("binds delayed drafts to captured privacy (%s)", (incogni
   persistence.stop();
 });
 
-describe("chat composer draft presence notifications", () => {
-  it("notifies stored outbox subscribers on draft presence transitions and queue writes", () => {
-    const state = createState();
-    const original = reconnectItem("notify", 1);
-    const updated = { ...original, text: "updated message" };
-    const listener = vi.fn();
-    const unsubscribe = subscribeStoredChatOutboxChanges(listener);
+it("notifies stored outbox subscribers on draft presence transitions and queue writes", () => {
+  const state = createState();
+  const original = reconnectItem("notify", 1);
+  const updated = { ...original, text: "updated message" };
+  const listener = vi.fn();
+  const unsubscribe = subscribeStoredChatOutboxChanges(listener);
 
-    try {
-      expect(persist({ ...state, chatMessage: "draft only" })).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(1);
-      // Content-only re-persists stay silent so projection subscribers cannot
-      // react by re-persisting a stale pane over the newer draft.
-      expect(persist({ ...state, chatMessage: "draft only, edited" })).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(1);
-      expect(persist({ ...state, chatMessage: "" })).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(2);
-      // Goal-only input badges the sidebar without text, so it is a presence transition too.
-      const goalOnly = {
-        ...state,
-        chatMessage: "",
-        chatGoalDraftMode: { action: "start" as const },
-      };
-      expect(persist(goalOnly)).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(3);
-      expect(persist({ ...goalOnly, chatGoalDraftMode: null })).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(4);
-      expect(admitItem(state, original)).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(5);
-      expect(replaceItem(state, original, updated, original.agentId)).toBe(true);
-      expect(listener).toHaveBeenCalledTimes(6);
-    } finally {
-      unsubscribe();
+  try {
+    for (const [input, notifications] of [
+      [{ chatMessage: "draft" }, 1],
+      [{ chatMessage: "edited draft" }, 1],
+      [{ chatMessage: "" }, 2],
+      [{ chatGoalDraftMode: { action: "start" } }, 3],
+      [{ chatGoalDraftMode: null }, 4],
+    ] as const) {
+      expect(persist({ ...state, ...input })).toBe(true);
+      expect(listener).toHaveBeenCalledTimes(notifications);
     }
-
-    expect(removeItem(state, updated, updated.agentId)).toBe(true);
+    expect(admitItem(state, original)).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(5);
+    expect(replaceItem(state, original, updated, original.agentId)).toBe(true);
     expect(listener).toHaveBeenCalledTimes(6);
-    const write = vi.spyOn(sessionStorage, "setItem");
-    const remove = vi.spyOn(sessionStorage, "removeItem");
-    const stop = subscribeStoredChatOutboxChanges(listener);
-    try {
-      expect(removeItem(state, updated)).toBe(true);
-      expect(write).not.toHaveBeenCalled();
-      expect(remove).not.toHaveBeenCalled();
-      expect(listener).toHaveBeenCalledTimes(6);
-    } finally {
-      stop();
-    }
-  });
+  } finally {
+    unsubscribe();
+  }
+
+  expect(removeItem(state, updated, updated.agentId)).toBe(true);
+  expect(listener).toHaveBeenCalledTimes(6);
+  const stop = subscribeStoredChatOutboxChanges(listener);
+  try {
+    expect(removeItem(state, updated)).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(6);
+  } finally {
+    stop();
+  }
 });

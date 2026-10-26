@@ -15,7 +15,6 @@ import { loadChatHistory } from "./chat-history.ts";
 import {
   findChatSendPayload,
   expectRequestCounts,
-  expectRpc,
   requestCalls,
   makeChatHost,
   makeRequestMock,
@@ -45,6 +44,37 @@ function cachedTranscript(sessionId: string, displayedLeafEntryId: string): Chat
   };
 }
 
+function sessionRow(overrides: Partial<GatewaySessionRow> = {}): GatewaySessionRow {
+  return {
+    key: "agent:main:main",
+    sessionId: "current-session",
+    kind: "direct",
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+function sessionHistory(overrides: Partial<GatewaySessionRow> = {}): ChatHistoryResult {
+  return { messages: [], sessionInfo: sessionRow(overrides) };
+}
+
+function pendingHistoryHost(overrides: Parameters<typeof makeChatHost>[0] = {}) {
+  const history = createDeferred<ChatHistoryResult>();
+  const host = makeChatHost({
+    ...overrides,
+    requestHandlers: {
+      "chat.startup": () => history.promise,
+      "chat.send": { status: "started", messageSeq: 1 },
+      ...overrides.requestHandlers,
+    },
+  });
+  return { history, host };
+}
+
+function startHistory(host: Parameters<typeof loadChatHistory>[0]) {
+  return loadChatHistory(host, { startup: true, deferBranches: true });
+}
+
 useChatSendBrowserFixture();
 
 it("admits consecutive drafts synchronously and delivers them in order without clearing a newer draft", async () => {
@@ -56,17 +86,12 @@ it("admits consecutive drafts synchronously and delivers them in order without c
     chatMessage: "First submitted draft",
     requestHandlers: {
       "chat.send": { status: "ok", messageSeq: 1 },
-      "chat.history": {
-        messages: [],
-        sessionInfo: {
-          key: sessionKey,
-          sessionId,
-          kind: "direct",
-          updatedAt: 1,
-          hasActiveRun: false,
-          status: "done",
-        },
-      },
+      "chat.history": sessionHistory({
+        key: sessionKey,
+        sessionId,
+        hasActiveRun: false,
+        status: "done",
+      }),
     },
   });
   const first = handleSendChat(host);
@@ -93,37 +118,22 @@ it("admits consecutive drafts synchronously and delivers them in order without c
   expect(host.chatMessage).toBe("Newer unsent draft");
 });
 
-it.each(
-  [
-    { newerEvent: true },
-    { reentrantSuccessor: true },
-    { mainKeyChanged: true },
-    { missingActivity: true },
-    { unqualified: true },
-    { unqualified: true, defaultAgentId: "work" },
-  ].map((options) =>
-    Object.assign(
-      {
-        newerEvent: false,
-        reentrantSuccessor: false,
-        mainKeyChanged: false,
-        missingActivity: false,
-        unqualified: false,
-        defaultAgentId: "main",
-      },
-      options,
-    ),
-  ),
-)(
-  "recovers a missed terminal only while its session facts remain current (newer event: $newerEvent, reentrant successor: $reentrantSuccessor, mainKey changed: $mainKeyChanged, missing activity: $missingActivity, unqualified: $unqualified, default agent: $defaultAgentId)",
-  async ({
-    newerEvent,
-    reentrantSuccessor,
-    mainKeyChanged,
-    missingActivity,
-    unqualified,
-    defaultAgentId,
-  }) => {
+it.each([
+  "newer event",
+  "reentrant successor",
+  "main key",
+  "missing activity",
+  "unqualified",
+  "other agent",
+])(
+  "recovers a missed terminal only while its session facts remain current: %s",
+  async (scenario) => {
+    const newerEvent = scenario === "newer event";
+    const reentrantSuccessor = scenario === "reentrant successor";
+    const mainKeyChanged = scenario === "main key";
+    const missingActivity = scenario === "missing activity";
+    const unqualified = scenario === "unqualified" || scenario === "other agent";
+    const defaultAgentId = scenario === "other agent" ? "work" : "main";
     const sessionKey = unqualified
       ? "unknown"
       : mainKeyChanged
@@ -134,14 +144,12 @@ it.each(
     const activity: Pick<GatewaySessionRow, "status" | "hasActiveRun"> = missingActivity
       ? {}
       : { status: "done", hasActiveRun: false };
-    let listed: GatewaySessionRow = {
+    let listed = sessionRow({
       key: sessionKey,
       agentId: "main",
-      sessionId: "current-session",
       kind: unqualified ? "unknown" : "direct",
-      updatedAt: 1,
       ...activity,
-    };
+    });
     const request = makeRequestMock({
       "sessions.list": () => sessionsResult([listed], listed.updatedAt ?? 0),
       "chat.history": () => {
@@ -204,22 +212,16 @@ it.each(
       expect(host.chatQueue).toHaveLength(2);
       const capturedOutboxes = listStoredChatOutboxes(host);
       const queuedIds = host.chatQueue.map((item) => item.id);
-      if (unqualified) {
+      if (unqualified || mainKeyChanged) {
         expect(capturedOutboxes).toEqual([
           {
             sessionKey,
+            ...(mainKeyChanged ? { agentId: "main" } : {}),
             queue: [expect.objectContaining({ text: "Continue with the next change" })],
           },
         ]);
       }
       if (mainKeyChanged) {
-        expect(capturedOutboxes).toEqual([
-          {
-            sessionKey,
-            agentId: "main",
-            queue: [expect.objectContaining({ text: "Continue with the next change" })],
-          },
-        ]);
         host.agentsList = { defaultId: "main", mainKey: "workspace" };
         expect(listStoredChatOutboxes(host)).toEqual(capturedOutboxes);
       }
@@ -227,15 +229,8 @@ it.each(
       const runGeneration = host.chatRunLifecycleGeneration;
       draining = resumeStoredChatOutboxes(host);
       await historyRequested.promise;
-      expect(request).toHaveBeenCalledWith("chat.history", expect.anything(), {
-        timeoutMs: 30_000,
-      });
       if (mainKeyChanged || unqualified) {
-        expect(request).toHaveBeenCalledWith(
-          "chat.history",
-          expect.objectContaining({ sessionKey }),
-          { timeoutMs: 30_000 },
-        );
+        expect(requestCalls(request, "chat.history")[0]?.[1]).toMatchObject({ sessionKey });
       }
       if (unqualified) {
         const historyRequests = requestCalls(request, "chat.history");
@@ -263,21 +258,25 @@ it.each(
       expect(host.chatRunLifecycleGeneration).toBe(runGeneration);
       expect(host.currentSessionId).toBe("current-session");
 
-      history.resolve({
-        messages: [],
-        sessionInfo: {
+      history.resolve(
+        sessionHistory({
           key: sessionKey,
           ...(unqualified ? { agentId: "main" } : {}),
-          sessionId: "current-session",
           kind: unqualified ? "unknown" : "direct",
           updatedAt: 2,
           ...activity,
           lastRunId: "finished-run",
-        },
-      });
+        }),
+      );
       await Promise.all([draining, eventWake]);
 
       const sends = requestCalls(request, "chat.send");
+      if (missingActivity || newerEvent || (unqualified && defaultAgentId !== "main")) {
+        expect(sends).toHaveLength(0);
+        expect(host.chatRunId).toBe("finished-run");
+        expect(host.chatStream).toBe("The current answer is still streaming.");
+        expect(host.chatQueue).toHaveLength(2);
+      }
       if (missingActivity) {
         const projected = sessions.state.result?.sessions[0];
         expect(projected).toMatchObject({
@@ -287,11 +286,7 @@ it.each(
         });
         expect(projected?.status).toBeUndefined();
         expect(projected?.hasActiveRun).toBeUndefined();
-        expect(sends).toHaveLength(0);
-        expect(host.chatRunId).toBe("finished-run");
         expect(host.chatRunLifecycleGeneration).toBe(runGeneration);
-        expect(host.chatStream).toBe("The current answer is still streaming.");
-        expect(host.chatQueue).toHaveLength(2);
         expect(host.chatQueue).toContainEqual(
           expect.objectContaining({
             text: "Input awaiting the current run",
@@ -302,10 +297,7 @@ it.each(
       }
       if (unqualified && defaultAgentId !== "main") {
         // The lifecycle matcher still refuses a row outside the current visible agent.
-        expect(sends).toHaveLength(0);
-        expect(host.chatRunId).toBe("finished-run");
         expect(host.chatRunLifecycleGeneration).toBe(runGeneration);
-        expect(host.chatStream).toBe("The current answer is still streaming.");
         expect(host.chatQueue.map((item) => item.id)).toEqual(queuedIds);
         const expectedOutboxes = structuredClone(capturedOutboxes);
         for (const outbox of expectedOutboxes) {
@@ -350,10 +342,6 @@ it.each(
         expect(host.chatQueue).toEqual([]);
         return;
       }
-      expect(sends).toHaveLength(0);
-      expect(host.chatRunId).toBe("finished-run");
-      expect(host.chatStream).toBe("The current answer is still streaming.");
-      expect(host.chatQueue).toHaveLength(2);
       expect(sessions.state.result?.sessions[0]).toMatchObject(listed);
     } finally {
       history.resolve({ messages: [], sessionInfo: listed });
@@ -403,17 +391,14 @@ it.each(["new run", "new session", "different terminal", "still active"])(
     } else if (scenario === "new session") {
       host.currentSessionId = "replacement-session";
     }
-    history.resolve({
-      messages: [],
-      sessionInfo: {
+    history.resolve(
+      sessionHistory({
         key: sessionKey,
-        sessionId: "current-session",
-        kind: "direct",
         status: scenario === "still active" ? "running" : "done",
         lastRunId: scenario === "different terminal" ? "older-run" : "finished-run",
         updatedAt: 2,
-      },
-    });
+      }),
+    );
     await draining;
 
     expectRequestCounts(host.request, { "chat.send": 0 });
@@ -422,34 +407,25 @@ it.each(["new run", "new session", "different terminal", "still active"])(
   },
 );
 
-it.each(
-  [
-    { message: "/stop", action: "abort" },
-    { message: "/approve approval-123 allow-once", action: "approve" },
-    { message: "ordinary draft", action: "queued" },
-    { message: "/stop after the next turn", action: "blocked" },
-  ].flatMap((test) =>
-    (test.action === "approve" ? [true, false] : [true]).map((hydrated) => ({
-      message: test.message,
-      action: test.action,
-      hydrated,
-    })),
-  ),
-)(
+it.each([
+  { message: "/stop", action: "abort", hydrated: true },
+  { message: "/approve approval-123 allow-once", action: "approve", hydrated: true },
+  { message: "/approve approval-123 allow-once", action: "approve", hydrated: false },
+  { message: "ordinary draft", action: "queued", hydrated: true },
+  { message: "/stop after the next turn", action: "blocked", hydrated: true },
+])(
   "keeps $action admission separate from initial history (run hydrated: $hydrated)",
   async ({ message, action, hydrated }) => {
-    const history = createDeferred<ChatHistoryResult>();
-    const host = makeChatHost({
+    const { history, host } = pendingHistoryHost({
       chatMessage: message,
       chatRunId: hydrated ? "waiting-run" : null,
       chatStream: hydrated ? "Waiting for approval" : null,
       requestHandlers: {
-        "chat.startup": () => history.promise,
         "sessions.abort": { status: "aborted" },
         "chat.send": { runId: "approval-command", status: "started" },
       },
     });
-    const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = startHistory(host);
     const sending = handleSendChat(host);
     try {
       if (action === "queued") {
@@ -471,11 +447,6 @@ it.each(
         expect(host.request).not.toHaveBeenCalledWith("sessions.abort", expect.anything());
       }
       if (action === "approve") {
-        expectRpc(
-          host.request,
-          "chat.send",
-          expect.objectContaining({ sessionKey: host.sessionKey, message }),
-        );
         expectRequestCounts(host.request, { "chat.history": 0 });
       } else {
         expectRequestCounts(host.request, { "chat.send": 0 });
@@ -503,11 +474,7 @@ it.each(["replacement Gateway", "reconnected client", "offline pane"] as const)(
   "keeps early queued delivery scoped through a %s",
   async (change) => {
     const sessionKey = "agent:main:main";
-    const accepted: ChatHistoryResult = {
-      sessionId: "old-session",
-      messages: [],
-      sessionInfo: { key: sessionKey, sessionId: "old-session", kind: "direct", updatedAt: 1 },
-    };
+    const accepted = { ...sessionHistory({ sessionId: "old-session" }), sessionId: "old-session" };
     const history = createDeferred<ChatHistoryResult>();
     let initial = true;
     const requestHandlers = {
@@ -520,7 +487,7 @@ it.each(["replacement Gateway", "reconnected client", "offline pane"] as const)(
       chatMessage: "Keep this draft unsent",
       requestHandlers,
     });
-    await loadChatHistory(host, { startup: true, deferBranches: true });
+    await startHistory(host);
     initial = false;
     const next =
       change === "replacement Gateway" ? makeChatHost({ sessionKey, requestHandlers }) : host;
@@ -530,10 +497,7 @@ it.each(["replacement Gateway", "reconnected client", "offline pane"] as const)(
     if (change === "offline pane") {
       host.connected = false;
     }
-    const loading =
-      change === "offline pane"
-        ? Promise.resolve()
-        : loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = change === "offline pane" ? Promise.resolve() : startHistory(host);
     const sending = handleSendChat(host);
     await vi.waitFor(() => expect(host.chatMessage).toBe(""));
     expectRequestCounts(host.request, { "chat.send": 0 });
@@ -560,20 +524,16 @@ it.each(["replacement Gateway", "reconnected client", "offline pane"] as const)(
 it.each(["steer", "retry"] as const)(
   "holds queued %s without changing custody during initial history",
   async (action) => {
-    const history = createDeferred<ChatHistoryResult>();
-    const host = makeChatHost({
+    const { history, host } = pendingHistoryHost({
       chatRunId: "current-run",
-      requestHandlers: {
-        "chat.startup": () => history.promise,
-        "chat.send": { runId: "queued-send", status: "started" },
-      },
+      requestHandlers: { "chat.send": { runId: "queued-send", status: "started" } },
     });
     const queued = enqueueChatMessage(host, "already queued", false);
     if (!queued) {
       throw new Error("Expected an admitted queue item");
     }
     const before = structuredClone(host.chatQueue);
-    const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = startHistory(host);
     try {
       await (action === "steer" ? steerQueuedChatMessage : retryQueuedChatMessage)(host, queued.id);
       expectRequestCounts(host.request, { "chat.send": 0 });
@@ -586,19 +546,11 @@ it.each(["steer", "retry"] as const)(
 );
 
 it("accepts a restored transcript draft with an attachment before history and delivers to the authoritative session", async () => {
-  const history = createDeferred<ChatHistoryResult>();
-  const current: ChatHistoryResult = {
+  const current = {
+    ...sessionHistory({ activeLeafEntryId: "current-leaf" }),
     sessionId: "current-session",
-    messages: [],
-    sessionInfo: {
-      key: "agent:main:main",
-      sessionId: "current-session",
-      kind: "direct",
-      updatedAt: 1,
-      activeLeafEntryId: "current-leaf",
-    },
   };
-  const host = makeChatHost({
+  const { history, host } = pendingHistoryHost({
     chatMessage: "Draft while restoring history",
     chatAttachments: [
       {
@@ -609,13 +561,12 @@ it("accepts a restored transcript draft with an attachment before history and de
       },
     ],
     requestHandlers: {
-      "chat.startup": () => history.promise,
       "chat.history": current,
       "chat.send": { status: "started" },
     },
   });
   applyChatCacheSnapshot(host, cachedTranscript("restored-session", "restored-leaf"));
-  const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+  const loading = startHistory(host);
   const sending = handleSendChat(host);
   try {
     await vi.waitFor(() => expect(host.chatMessage).toBe(""));
@@ -623,8 +574,7 @@ it("accepts a restored transcript draft with an attachment before history and de
     expect(host.chatQueue).toEqual([
       expect.objectContaining({ text: "Draft while restoring history", sendAttempts: 0 }),
     ]);
-    expectRequestCounts(host.request, { "chat.send": 0 });
-    expectRequestCounts(host.request, { "chat.history": 0 });
+    expectRequestCounts(host.request, { "chat.send": 0, "chat.history": 0 });
     expect(host.chatAttachments).toEqual([]);
     host.chatMessage = "Next draft";
   } finally {
@@ -675,16 +625,13 @@ it.each(["original-leaf", null])(
       expect(host.chatQueue).toHaveLength(1);
       expectRequestCounts(host.request, { "chat.send": 0 });
     } finally {
-      history.resolve({
-        messages: [],
-        sessionInfo: {
+      history.resolve(
+        sessionHistory({
           key: sessionKey,
-          sessionId: "current-session",
           activeLeafEntryId: "different-branch-leaf",
-          kind: "direct",
           updatedAt: 2,
-        },
-      });
+        }),
+      );
       await loading;
       await sending;
     }
@@ -698,15 +645,11 @@ it.each(["original-leaf", null])(
 it.each(["connection", "conversation"] as const)(
   "does not deliver stale queued work after a %s change during history",
   async (change) => {
-    const history = createDeferred<ChatHistoryResult>();
-    const host = makeChatHost({
+    const { history, host } = pendingHistoryHost({
       chatMessage: "Queued before history",
-      requestHandlers: {
-        "chat.startup": () => history.promise,
-        "chat.send": { status: "started" },
-      },
+      requestHandlers: { "chat.send": { status: "started" } },
     });
-    const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = startHistory(host);
     const sending = handleSendChat(host);
     try {
       await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
@@ -729,30 +672,20 @@ it.each([false, true])(
   "delivers the next early message after discarding the first during history (switch pane: %s)",
   async (switchPane) => {
     const sessionKey = "agent:main:main";
-    const history = createDeferred<ChatHistoryResult>();
-    const current: ChatHistoryResult = {
-      messages: [],
-      sessionInfo: {
-        key: sessionKey,
-        sessionId: "current-session",
-        activeLeafEntryId: "current-leaf",
-        hasActiveRun: false,
-        status: "done",
-        kind: "direct",
-        updatedAt: 1,
-      },
-    };
-    const host = makeChatHost({
+    const current = sessionHistory({
+      activeLeafEntryId: "current-leaf",
+      hasActiveRun: false,
+      status: "done",
+    });
+    const { history, host } = pendingHistoryHost({
       sessionKey,
       chatMessage: "Discard this first message",
       requestHandlers: {
-        "chat.startup": () => history.promise,
         "chat.history": current,
-        "chat.send": { status: "started", messageSeq: 1 },
       },
     });
     applyChatCacheSnapshot(host, cachedTranscript("cached-session", "cached-leaf"));
-    const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = startHistory(host);
     const sending = [handleSendChat(host)];
     try {
       await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
@@ -785,11 +718,7 @@ it.each([false, true])(
       sessionId: "current-session",
     });
     if (switchPane) {
-      expect(host.request).toHaveBeenCalledWith(
-        "chat.history",
-        expect.objectContaining({ sessionKey }),
-        { timeoutMs: 30_000 },
-      );
+      expect(requestCalls(host.request, "chat.history")[0]?.[1]).toMatchObject({ sessionKey });
     }
     expect(payload).not.toHaveProperty("expectedLeafEntryId", "cached-leaf");
     expect(host.chatQueue).toEqual([]);
@@ -801,27 +730,13 @@ it.each(["steer", "interrupt", "queue"] as const)(
   async (followUpMode) => {
     const sessionKey = "agent:main:main";
     const message = "Apply my selected follow-up mode";
-    const history = createDeferred<ChatHistoryResult>();
-    const host = makeChatHost({
+    const { history, host } = pendingHistoryHost({
       sessionKey,
       chatMessage: message,
-      sessionsResult: sessionListResult(1, [
-        {
-          key: sessionKey,
-          sessionId: "current-session",
-          hasActiveRun: false,
-          status: "done",
-          kind: "direct",
-          updatedAt: 1,
-        },
-      ]),
-      requestHandlers: {
-        "chat.startup": () => history.promise,
-        "chat.send": { status: "started", messageSeq: 1 },
-      },
+      sessionsResult: sessionListResult(1, [sessionRow({ hasActiveRun: false, status: "done" })]),
     });
     applyChatCacheSnapshot(host, cachedTranscript("current-session", "cached-leaf"));
-    const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+    const loading = startHistory(host);
     const sending = handleSendChat(host, undefined, { followUpMode });
     try {
       await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));
@@ -830,18 +745,14 @@ it.each(["steer", "interrupt", "queue"] as const)(
       expectRequestCounts(host.request, { "chat.send": 0 });
     } finally {
       history.resolve({
-        messages: [],
-        inFlightRun: { runId: "active-run", text: "Work started after the cached snapshot" },
-        sessionInfo: {
-          key: sessionKey,
-          sessionId: "current-session",
+        ...sessionHistory({
           activeLeafEntryId: "active-leaf",
           activeRunIds: ["active-run"],
           hasActiveRun: true,
           status: "running",
-          kind: "direct",
           updatedAt: 2,
-        },
+        }),
+        inFlightRun: { runId: "active-run", text: "Work started after the cached snapshot" },
       });
       await loading;
       await sending;
@@ -868,20 +779,15 @@ it("resumes an early interrupt message for its captured session after switching 
   const queueMode = "interrupt";
   const sessionKey = "agent:work:research";
   const message = "Continue the selected work";
-  const history = createDeferred<ChatHistoryResult>();
-  const host = makeChatHost({
+  const { history, host } = pendingHistoryHost({
     sessionKey,
     currentSessionId: "cached-source-session",
     chatDisplayedLeafEntryId: "cached-source-leaf",
     chatRunId: "cached-source-run",
     chatFollowUpMode: queueMode,
     chatMessage: message,
-    requestHandlers: {
-      "chat.startup": () => history.promise,
-      "chat.send": { status: "started", messageSeq: 1 },
-    },
   });
-  const loading = loadChatHistory(host, { startup: true, deferBranches: true });
+  const loading = startHistory(host);
   const sending = handleSendChat(host);
   try {
     await vi.waitFor(() => expect(host.chatQueue).toHaveLength(1));

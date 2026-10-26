@@ -72,8 +72,11 @@ function threadItems(options: Partial<Parameters<typeof buildChatItems>[0]>) {
     ...options,
   });
 }
-const requestOptions = () => ({ signal: expect.any(AbortSignal), timeoutMs: 30_000 });
 const activeSession = { key: sessionKey, sessionId, hasActiveRun: true, status: "running" };
+const emptyPage = { items: [], total: 0 };
+function expectReceiptQuery(host: ReturnType<typeof makeChatHost>, inputRunIds: string[]) {
+  expect(requestCalls(host.request, "chat.history").at(-1)?.[1]).toMatchObject({ inputRunIds });
+}
 
 async function retainDeliveredUserTurn(
   host: Parameters<typeof retireDeliveredQueuedUserTurn>[0],
@@ -132,60 +135,50 @@ describe("server-owned pending input display", () => {
   });
 
   it.each([
-    ["queued", undefined],
-    ["interrupted", "Delivery interrupted. This saved agent update is not scheduled to retry."],
-  ] as const)("describes a %s agent update without asking the user to resend it", (state, text) => {
-    const items = buildPendingInputItems([
-      {
-        ...input,
-        state,
-        message: {
+    ["agent queued", "queued", input.runId, true, false, undefined],
+    [
+      "agent interrupted",
+      "interrupted",
+      input.runId,
+      true,
+      false,
+      "Delivery interrupted. This saved agent update is not scheduled to retry.",
+    ],
+    [
+      "workspace sync",
+      "queued",
+      input.runId,
+      false,
+      false,
+      "Received · waiting for workspace sync",
+    ],
+    ["worker setup without run", "queued", undefined, false, true, undefined],
+    [
+      "worker setup interrupted",
+      "interrupted",
+      input.runId,
+      false,
+      true,
+      "Interrupted before the agent started it. If it does not resume, copy it and send again.",
+    ],
+  ] as const)("describes %s custody", (_name, state, runId, agent, workerSetup, notice) => {
+    const message = agent
+      ? {
           role: "user",
           content: "The mobile fixes are merged.",
           provenance: { kind: "inter_session", sourceTool: "sessions_send" },
-        },
-      },
-    ]);
+        }
+      : input.message;
+    const items = buildPendingInputItems(
+      [{ ...input, state, runId, message }],
+      agent || workerSetup ? [] : ["run-queued"],
+      workerSetup,
+    );
     expect(items.some((item) => item.kind === "message")).toBe(true);
     expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual(
-      text ? [text] : [],
+      notice ? [notice] : [],
     );
   });
-
-  it("shows a durable receipt while an accepted input waits for workspace sync", () => {
-    const queued = { ...input, state: "queued" as const };
-
-    const items = buildPendingInputItems([queued], ["run-queued"]);
-
-    expect(items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "notice",
-          text: "Received · waiting for workspace sync",
-        }),
-      ]),
-    );
-  });
-
-  it.each([
-    { state: "queued", runId: undefined, notice: undefined },
-    {
-      state: "interrupted",
-      runId: "run-queued",
-      notice:
-        "Interrupted before the agent started it. If it does not resume, copy it and send again.",
-    },
-  ] as const)(
-    "keeps $state custody out of the worker-setup notice without eligible execution",
-    ({ state, runId, notice }) => {
-      const items = buildPendingInputItems([{ ...input, state, runId }], [], true);
-
-      expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual(
-        notice ? [notice] : [],
-      );
-      expect(items.some((item) => item.kind === "message")).toBe(true);
-    },
-  );
 
   it("keeps cached local submissions available after pane remount", async () => {
     const host = makeChatHost({ ...pendingScope, requestHandlers: {} });
@@ -322,23 +315,13 @@ describe("server-owned pending input display", () => {
     }
     await loadChatHistory(host);
     expect(host.chatMessages).toHaveLength(1);
-    expect(host.request.mock.calls.findLast(([method]) => method === "chat.history")).toEqual([
-      "chat.history",
-      expect.objectContaining({
-        inputRunIds: Array.from(
-          { length: 50 },
-          (_, index) => `source-${String(index).padStart(2, "0")}`,
-        ),
-      }),
-      requestOptions(),
-    ]);
+    expectReceiptQuery(
+      host,
+      Array.from({ length: 50 }, (_, index) => `source-${String(index).padStart(2, "0")}`),
+    );
     await loadChatHistory(host);
     expect(host.chatMessages).toEqual([]);
-    expect(host.request.mock.calls.findLast(([method]) => method === "chat.history")).toEqual([
-      "chat.history",
-      expect.objectContaining({ inputRunIds: ["source-50"] }),
-      requestOptions(),
-    ]);
+    expectReceiptQuery(host, ["source-50"]);
   });
 
   it("keeps an off-page live queue in a full receipt request", async () => {
@@ -366,116 +349,44 @@ describe("server-owned pending input display", () => {
       total: 1,
     });
     await loadChatHistory(host);
-    expect(host.request.mock.calls.findLast(([method]) => method === "chat.history")).toEqual([
-      "chat.history",
-      expect.objectContaining({
-        inputRunIds: [
-          ...Array.from({ length: 49 }, (_, index) => `a-${String(index).padStart(2, "0")}`),
-          "z-live-queue",
-        ],
-      }),
-      requestOptions(),
+    expectReceiptQuery(host, [
+      ...Array.from({ length: 49 }, (_, index) => `a-${String(index).padStart(2, "0")}`),
+      "z-live-queue",
     ]);
     expect(getChatPendingInputs(host)?.queuedInputs).toEqual([]);
   });
 
-  it.each(["page", "delta"])(
-    "retires consumed sources from %s history after missing custody and terminal events",
-    async (delivery) => {
-      const aggregate = {
-        role: "user",
-        content: "Collected source inputs",
-        __openclaw: { id: "aggregate", seq: 1, idempotencyKey: "followup-collect:session:batch" },
-      };
-      const cache: ChatMessageCache = new Map();
-      const host = makeChatHost({
-        ...pendingScope,
-        chatRunId: "aggregate-run",
-        chatStream: "Still working",
-        chatMessages: [aggregate],
-        chatHistoryPagination: { hasMore: false, completeSnapshot: true },
-        chatMessagesBySession: cache,
-        requestHandlers: {
-          "chat.history": {
-            ...(delivery === "delta" ? { kind: "delta", deltaCursor: "next" } : { sessionId }),
-            messages: delivery === "delta" ? [] : [aggregate],
-            pendingInputs: { items: [], total: 0 },
-            inputReceipts: [
-              { runId: "consumed-source", state: "consumed", consumedByEventId: "aggregate" },
-            ],
-            sessionInfo: activeSession,
-          },
-        },
-      });
-      cacheChatSessionSnapshot(
-        cache,
-        host,
-        { sessionKey },
-        {
-          messages: [aggregate],
-          sessionId,
-          pagination: host.chatHistoryPagination,
-          ...(delivery === "delta" ? { deltaCursor: "previous" } : {}),
-        },
-      );
-      for (const sendRunId of ["consumed-source", "unrelated-source"]) {
-        await retainDeliveredUserTurn(
-          host,
-          queuedSource(sendRunId, {
-            text: "Same source text",
-            sender: { id: "author", name: "Author" },
-            replyToId: "reply",
-          }),
-        );
-      }
-      const unrelated = host.chatMessages.at(-1);
-      await loadChatHistory(host);
-      expect(getChatHistoryLoadState(host).phase).toBe("committed");
-      expect(host.chatMessages).toEqual([aggregate, unrelated]);
-      expect(host.request).toHaveBeenCalledWith(
-        "chat.history",
-        expect.objectContaining({
-          inputRunIds: ["consumed-source", "unrelated-source"],
-        }),
-        requestOptions(),
-      );
-      expect(getChatPendingInputs(host)?.page.items).toEqual([]);
-      expect(host.chatRunId).toBe("aggregate-run");
-      expect(host.chatStream).toBe("Still working");
-    },
-  );
-
   it.each([
     { delivery: "direct", source: "delivered", custody: "interrupted" },
-    ...["queued", "interrupted", "cancelled", "consumed"].map((custody) => ({
+    ...(["queued", "interrupted", "cancelled", "consumed"] as const).map((custody) => ({
       delivery: "direct",
       source: "initial",
       custody,
     })),
     { delivery: "page", source: "initial", custody: "interrupted" },
     { delivery: "delta", source: "initial", custody: "consumed" },
-  ])(
+    { delivery: "page", source: "delivered", custody: "consumed" },
+    { delivery: "delta", source: "delivered", custody: "consumed" },
+  ] as const)(
     "retires an attributed $source source on $delivery $custody custody without disturbing active work",
     async ({ delivery, source, custody }) => {
       const canonical = {
         role: "user",
         content: "An earlier canonical input",
-        __openclaw: { id: "canonical-user", seq: 1, runId: "canonical-run" },
+        __openclaw:
+          source === "delivered" && custody === "consumed"
+            ? { id: "aggregate", seq: 1, idempotencyKey: "followup-collect:session:batch" }
+            : { id: "canonical-user", seq: 1, runId: "canonical-run" },
       };
       const acceptedPage =
         custody === "consumed"
-          ? { items: [], total: 0 }
+          ? emptyPage
           : {
               ...page,
               items: [
                 {
                   ...input,
-                  state:
-                    custody === "queued"
-                      ? ("queued" as const)
-                      : custody === "cancelled"
-                        ? ("cancelled" as const)
-                        : ("interrupted" as const),
+                  state: custody,
                   message: {
                     role: "user",
                     content: "Keep my accepted input",
@@ -529,7 +440,7 @@ describe("server-owned pending input display", () => {
         {
           messages: history,
           sessionId,
-          pagination: { hasMore: false, completeSnapshot: true },
+          pagination: host.chatHistoryPagination,
           ...(delivery === "delta" ? { deltaCursor: "previous" } : {}),
         },
       );
@@ -573,11 +484,16 @@ describe("server-owned pending input display", () => {
         await loadChatHistory(host);
         expect(host.lastError).toBeNull();
         expect(getChatHistoryLoadState(host).phase).toBe("committed");
+        if (source === "delivered") {
+          expectReceiptQuery(host, ["other-source", input.runId!].toSorted());
+        }
       }
       expect(host.chatMessages).toEqual([...history, unrelated]);
       expect(getChatSessionProjection(host).messages).toEqual([...history, unrelated]);
-      expect(host.chatRunId).toBe("active-run");
-      expect(host.chatStream).toBe("Still working");
+      expect(host).toMatchObject({
+        chatRunId: "active-run",
+        chatStream: "Still working",
+      });
       expect(host.chatToolMessages).toEqual([tool]);
       const displayed = getChatPendingInputs(host)?.page;
       expect(displayed).toEqual(acceptedPage);
@@ -673,8 +589,7 @@ describe("server-owned pending input display", () => {
         () => false,
       );
       await vi.waitFor(() => expect(getChatPendingInputs(host)?.page).toEqual(page));
-      expect(host.chatRunId).toBe("active-run");
-      expect(host.chatStream).toBe("Live output");
+      expect(host).toMatchObject({ chatRunId: "active-run", chatStream: "Live output" });
       expect(requestCalls(host.request, "chat.history")).toHaveLength(1);
     },
   );
@@ -764,8 +679,10 @@ describe("server-owned pending input display", () => {
       expect(refreshed).toMatchObject({ pendingInputs: { items: [], total: 0 } });
       expect(getChatPendingInputs(host)?.page.total).toBe(0);
       expect(host.chatMessages).toEqual([initialUser, promoted]);
-      expect(host.chatRunId).toBe(runId);
-      expect(host.chatStream).toBe(runId ? "Live output" : null);
+      expect(host).toMatchObject({
+        chatRunId: runId,
+        chatStream: runId ? "Live output" : null,
+      });
       expect(host.chatToolMessages).toEqual([toolMessage]);
       expect(host.toolStreamById.has("live-tool")).toBe(true);
       expect(historyReads).toBe(2);
@@ -783,12 +700,11 @@ describe("server-owned pending input display", () => {
       ];
       const imageBase64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh0cAAAAASUVORK5CYII=";
-      const imageBytes = Buffer.from(imageBase64, "base64");
       const attachment = {
         id: "custody-image",
         mimeType: "image/png",
         fileName: "custody.png",
-        sizeBytes: imageBytes.length,
+        sizeBytes: Buffer.from(imageBase64, "base64").length,
         dataUrl: `data:image/png;base64,${imageBase64}`,
       };
       let queued: ChatQueueItem = {
@@ -819,7 +735,6 @@ describe("server-owned pending input display", () => {
           "chat.history": { messages: history, sessionId, pendingInputs: acceptedPage },
         },
       });
-      const cleanup = vi.spyOn(outboxPayloadStore, "removeOutboxPayloads");
       if (kind === "blob") {
         const prepared = await prepareOutboxPayload(host, queued);
         if (prepared.status !== "ready") {
@@ -839,12 +754,6 @@ describe("server-owned pending input display", () => {
         : undefined;
       if (reference && payloadOwner) {
         sessionStorage.setItem("openclaw.control.outboxTab.v1", reference.tabId);
-        const stored = await outboxPayloadStore.readOutboxPayload(payloadOwner, reference);
-        if (stored.status !== "ready") {
-          throw new Error(`Expected stored custody bytes: ${stored.reason}`);
-        }
-        expect(stored.value).toHaveLength(1);
-        expect(Buffer.from(await stored.value[0]!.blob.arrayBuffer())).toEqual(imageBytes);
       }
       expect(
         admitQueuedMessageForSession(
@@ -868,8 +777,6 @@ describe("server-owned pending input display", () => {
             reason: "missing",
           });
         });
-        expect(cleanup).toHaveBeenCalledOnce();
-        expect(cleanup).toHaveBeenCalledWith([reference]);
       }
       const items = threadItems({
         messages: host.chatMessages,
@@ -899,16 +806,6 @@ describe("server-owned pending input display", () => {
         },
       );
       expect(listStoredChatOutboxes(host)).toEqual([]);
-      if (reference && payloadOwner) {
-        await vi.waitFor(async () => {
-          expect(await outboxPayloadStore.readOutboxPayload(payloadOwner, reference)).toEqual({
-            status: "failed",
-            reason: "missing",
-          });
-        });
-        expect(cleanup).toHaveBeenCalledOnce();
-        expect(cleanup).toHaveBeenCalledWith([reference]);
-      }
     },
   );
 

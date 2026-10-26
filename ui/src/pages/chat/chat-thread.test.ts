@@ -116,6 +116,13 @@ function canvasToolOutput(viewId: string, title: string, preferredHeight: number
   });
 }
 
+function canvasBlock<P extends object>(preview: P) {
+  return {
+    type: "canvas",
+    preview: { kind: "canvas", surface: "assistant_message", render: "url", ...preview },
+  };
+}
+
 function messageGroups(props: Partial<CachedChatItemsProps>): MessageGroup[] {
   return buildCachedChatItems(createProps(props)).filter((item) => item.kind === "group");
 }
@@ -1296,15 +1303,7 @@ describe("buildCachedChatItems", () => {
         assistant(
           [
             textBlock(text),
-            {
-              type: "canvas",
-              preview: {
-                kind: "canvas",
-                surface: "assistant_message",
-                render: "url",
-                url: "/__openclaw__/canvas/documents/cv_url_match/index.html",
-              },
-            },
+            canvasBlock({ url: "/__openclaw__/canvas/documents/cv_url_match/index.html" }),
           ],
           1_003,
         ),
@@ -1540,15 +1539,7 @@ describe("buildCachedChatItems", () => {
           },
         ],
       };
-      const canvas = {
-        type: "canvas",
-        preview: {
-          kind: "canvas",
-          surface: "assistant_message",
-          render: "url",
-          viewId: "cv_final",
-        },
-      };
+      const canvas = canvasBlock({ viewId: "cv_final" });
       const saved = assistant([textBlock("Your counter is ready."), canvas], 1_003, {
         __openclaw: { id: "saved-final", seq: 3, runId },
       });
@@ -1896,19 +1887,13 @@ function mcpAppDescriptor(viewId: string, toolCallId: string) {
 }
 
 function mcpAppCanvasBlock(viewId: string, toolCallId: string) {
-  return {
-    type: "canvas",
-    preview: {
-      kind: "canvas",
-      surface: "assistant_message",
-      render: "url",
-      viewId,
-      title: "Demo App",
-      url: `/__openclaw__/canvas/documents/${viewId}/index.html`,
-      sandbox: "scripts",
-      mcpApp: mcpAppDescriptor(viewId, toolCallId),
-    },
-  };
+  return canvasBlock({
+    viewId,
+    title: "Demo App",
+    url: `/__openclaw__/canvas/documents/${viewId}/index.html`,
+    sandbox: "scripts",
+    mcpApp: mcpAppDescriptor(viewId, toolCallId),
+  });
 }
 
 function mcpAppResult(viewId: string, toolCallId: string, timestamp: number) {
