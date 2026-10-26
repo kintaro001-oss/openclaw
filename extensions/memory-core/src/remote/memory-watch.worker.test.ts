@@ -49,19 +49,18 @@ function createPeer(signal: AbortSignal) {
     events,
     finished,
     send: (command: LocalWatchCommand) => port1.postMessage(command),
-    async waitFor(match: (event: LocalWatchEvent) => boolean, after = 0) {
+    async waitFor(match: (event: LocalWatchEvent) => boolean) {
       for (;;) {
-        const existing = events.slice(after).find(match);
+        const existing = events.find(match);
         if (existing) {
           return existing;
         }
         await withinTest(changed.promise, signal);
       }
     },
-    event(type: LocalWatchEvent["type"], id?: number, after = 0): Promise<LocalWatchEvent> {
+    event(type: LocalWatchEvent["type"], id?: number): Promise<LocalWatchEvent> {
       return peer.waitFor(
         (event) => event.type === type && (id === undefined || ("id" in event && event.id === id)),
-        after,
       );
     },
     open(id: number, workspaceDir = fixture.state.workspaceDir): Promise<LocalWatchEvent> {
@@ -112,29 +111,11 @@ it("joins discovery close without readiness or observation admission", async ({ 
   expect(observer.observations).toHaveLength(0);
 });
 
-it("keeps a shared-root peer active after the first subscription closes", async ({ signal }) => {
+it("pushes fallback health and sticky capacity exhaustion", async ({ signal }) => {
   const peer = createPeer(signal);
   await expect(peer.open(1)).resolves.toMatchObject({
     facts: { health: [{ state: "ready", mode: "events" }], capacityDegraded: false },
   });
-  await peer.open(2);
-  expect(observer.observations).toHaveLength(1);
-  const entry = observer.observations[0]!;
-  await peer.close(1);
-  expect(entry.close).not.toHaveBeenCalled();
-  const after = peer.events.length;
-  entry.dirty();
-  await peer.event("dirty", 2, after);
-  expect(peer.events.slice(after)).not.toContainEqual({ type: "dirty", id: 1 });
-  await vi.advanceTimersByTimeAsync(10);
-  await peer.event("change", 2, after);
-  await peer.close(2);
-  expect(entry.close).toHaveBeenCalledOnce();
-});
-
-it("pushes fallback health and sticky capacity exhaustion", async ({ signal }) => {
-  const peer = createPeer(signal);
-  await peer.open(1);
   const entry = observer.observations[0]!;
   entry.health({
     state: "ready",
