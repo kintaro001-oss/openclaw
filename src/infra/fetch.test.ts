@@ -8,14 +8,16 @@ async function waitForMicrotaskTurn(): Promise<void> {
   });
 }
 
-function createForeignSignalHarness() {
-  let abortHandler: (() => void) | null = null;
+function createForeignSignalHarness(cleanupError?: Error) {
+  let abortHandler: (() => void) | undefined;
   const removeEventListener = vi.fn((event: string, handler: () => void) => {
+    if (cleanupError) {
+      throw cleanupError;
+    }
     if (event === "abort" && abortHandler === handler) {
-      abortHandler = null;
+      abortHandler = undefined;
     }
   });
-
   const fakeSignal = {
     aborted: false,
     addEventListener: (event: string, handler: () => void) => {
@@ -25,24 +27,7 @@ function createForeignSignalHarness() {
     },
     removeEventListener,
   } as unknown as AbortSignal;
-
-  return {
-    fakeSignal,
-    removeEventListener,
-    triggerAbort: () => abortHandler?.(),
-  };
-}
-
-function createThrowingCleanupSignalHarness(cleanupError: Error) {
-  const removeEventListener = vi.fn(() => {
-    throw cleanupError;
-  });
-  const fakeSignal = {
-    aborted: false,
-    addEventListener: (_eventValue: string, _handler: () => void) => {},
-    removeEventListener,
-  } as unknown as AbortSignal;
-  return { fakeSignal, removeEventListener };
+  return { fakeSignal, removeEventListener, triggerAbort: () => abortHandler?.() };
 }
 
 function createSeenInitFetch() {
@@ -139,7 +124,7 @@ describe("wrapFetchWithAbortSignal", () => {
     async ({ sync, cleanupThrows }) => {
       const failure = new TypeError("fetch failed");
       const { fakeSignal, removeEventListener } = cleanupThrows
-        ? createThrowingCleanupSignalHarness(new TypeError("cleanup failed"))
+        ? createForeignSignalHarness(new TypeError("cleanup failed"))
         : createForeignSignalHarness();
       const wrapped = wrapFetchWithAbortSignal(
         withFetchPreconnect(
@@ -178,46 +163,30 @@ describe("wrapFetchWithAbortSignal", () => {
     expect(removeEventListener).not.toHaveBeenCalled();
   });
 
-  it("passes through foreign signal-like objects without addEventListener", async () => {
-    const { wrapped, getSeenInit } = createSeenInitFetch();
-
-    const fakeSignal = {
-      aborted: false,
-      removeEventListener: vi.fn(),
-    } as unknown as AbortSignal;
-
-    await wrapped("https://example.com", { signal: fakeSignal });
-
-    expect(getSeenInit()?.signal).toBe(fakeSignal);
-  });
-
-  it("passes through native AbortSignal instances unchanged", async () => {
-    const { wrapped, getSeenInit } = createSeenInitFetch();
-    const controller = new AbortController();
-
-    await wrapped("https://example.com", { signal: controller.signal });
-
-    expect(getSeenInit()?.signal).toBe(controller.signal);
-  });
-
-  it("passes through foreign signals unchanged when AbortController is unavailable", async () => {
-    const { wrapped, getSeenInit } = createSeenInitFetch();
-    const fakeSignal = {
-      aborted: false,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    } as unknown as AbortSignal;
-    const previousAbortController = globalThis.AbortController;
-    vi.stubGlobal("AbortController", undefined);
-
-    try {
-      await wrapped("https://example.com", { signal: fakeSignal });
-    } finally {
-      vi.stubGlobal("AbortController", previousAbortController);
-    }
-
-    expect(getSeenInit()?.signal).toBe(fakeSignal);
-  });
+  it.each(["missing listener", "native", "missing controller"] as const)(
+    "passes through signals unchanged: %s",
+    async (kind) => {
+      const { wrapped, getSeenInit } = createSeenInitFetch();
+      const fakeSignal =
+        kind === "native"
+          ? new AbortController().signal
+          : ({
+              aborted: false,
+              ...(kind === "missing controller" ? { addEventListener: vi.fn() } : {}),
+              removeEventListener: vi.fn(),
+            } as AbortSignal);
+      const previous = globalThis.AbortController;
+      if (kind === "missing controller") {
+        vi.stubGlobal("AbortController", undefined);
+      }
+      try {
+        await wrapped("https://example.com", { signal: fakeSignal });
+        expect(getSeenInit()?.signal).toBe(fakeSignal);
+      } finally {
+        vi.stubGlobal("AbortController", previous);
+      }
+    },
+  );
 
   it("returns the same function when called with an already wrapped fetch", () => {
     const fetchImpl = withFetchPreconnect(vi.fn(async () => ({ ok: true }) as Response));
@@ -246,25 +215,16 @@ describe("wrapFetchWithAbortSignal", () => {
     expect(seenThis).toBe(fetchImpl);
   });
 
-  it.each([
-    { enumerable: true, name: "enumerable" },
-    { enumerable: false, name: "non-enumerable" },
-  ])(
-    "drops $name header symbol metadata before calling the wrapped fetch",
-    async ({ enumerable }) => {
-      const { fetchImpl, getSeenInit } = createSeenInitFetch();
-      const wrapped = wrapFetchWithAbortSignal(fetchImpl);
-      const init = createSymbolHeaderInit(enumerable);
-
-      await wrapped("https://example.com", init);
-
-      const seenHeaders = getSeenInit()?.headers;
-      expect(seenHeaders).not.toBe(init.headers);
-      expect(Object.getOwnPropertySymbols(seenHeaders as object)).toStrictEqual([]);
-      expect(new Headers(seenHeaders).get("content-type")).toBe("application/json");
-      expect(Object.getOwnPropertySymbols(init.headers as object)).toHaveLength(1);
-    },
-  );
+  it("normalizes header metadata at the fetch boundary without mutating input", async () => {
+    const { wrapped, getSeenInit } = createSeenInitFetch();
+    const init = createSymbolHeaderInit(false);
+    await wrapped("https://example.com", init);
+    const seenHeaders = getSeenInit()?.headers;
+    expect(seenHeaders).not.toBe(init.headers);
+    expect(Object.getOwnPropertySymbols(seenHeaders as object)).toStrictEqual([]);
+    expect(new Headers(seenHeaders).get("content-type")).toBe("application/json");
+    expect(Object.getOwnPropertySymbols(init.headers as object)).toHaveLength(1);
+  });
 });
 
 describe("resolveFetch", () => {

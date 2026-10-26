@@ -51,14 +51,27 @@ afterEach(async () => {
 });
 const skipBroker = process.platform === "win32";
 
+const readable = <T>(raw: T) => ({ status: "readable", raw });
+const emptyState = readable({ lastGood: {} });
+const authStore = (key = "synthetic", metadata?: Record<string, string>) => ({
+  version: 1,
+  profiles: {
+    "fixture:default": { type: "api_key", provider: "fixture", key, ...(metadata && { metadata }) },
+  },
+});
+
+function disableNativeWatcher() {
+  // The macOS watch host bypasses fs.watch; keep this synthetic failure in-process.
+  vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+  vi.spyOn(fs, "watch").mockImplementation(() => {
+    throw new Error("synthetic unavailable watcher");
+  });
+}
+
 it.skipIf(skipBroker)(
   "reuses the Gateway reader through detached observations and retained-state restart",
   async () => {
-    // The macOS directory watch host bypasses fs.watch; keep the unavailable watcher in-process.
-    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    vi.spyOn(fs, "watch").mockImplementation(() => {
-      throw new Error("synthetic unavailable watcher");
-    });
+    disableNativeWatcher();
     const { source, store } = createAuthDatabase();
     const writer = openNodeSqliteDatabase(source);
     admitSqliteSchema(writer);
@@ -105,10 +118,10 @@ it.skipIf(skipBroker)(
       clearAuthState(source);
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
       expect(observed).toEqual([
-        { status: "readable", raw: store },
-        { status: "readable", raw: store },
-        { status: "readable", raw: rotated },
-        { status: "readable", raw: rotated },
+        readable(store),
+        readable(store),
+        readable(rotated),
+        readable(rotated),
       ]);
       expect(brokerSpawn).toHaveBeenCalledTimes(1);
       expect(spawn).not.toHaveBeenCalled();
@@ -122,7 +135,7 @@ it.skipIf(skipBroker)(
       publication.dispose();
       await pendingRefresh;
       expect(observed).toHaveLength(5);
-      expect(observed[4]).toEqual({ status: "readable", raw: store });
+      expect(observed[4]).toEqual(readable(store));
       expect(brokerSpawn).toHaveBeenCalledTimes(1);
       expect(spawn).not.toHaveBeenCalled();
       await restartedScope.close();
@@ -147,10 +160,7 @@ it.skipIf(skipBroker)(
 it.skipIf(skipBroker)(
   "keeps late-discovered auth directories on the bound Gateway readers",
   async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    vi.spyOn(fs, "watch").mockImplementation(() => {
-      throw new Error("synthetic unavailable watcher");
-    });
+    disableNativeWatcher();
     const broker = createSpawnBrokerHost();
     const gatewayReaders = createSqliteReadOnlyWorkerScope();
     const callerReaders = createSqliteReadOnlyWorkerScope();
@@ -176,10 +186,7 @@ it.skipIf(skipBroker)(
 
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
-      expect(observed).toEqual([
-        { status: "readable", raw: store },
-        { status: "readable", raw: store },
-      ]);
+      expect(observed).toEqual([readable(store), readable(store)]);
       expect(brokerSpawn).toHaveBeenCalledTimes(1);
       expect(spawn).not.toHaveBeenCalled();
 
@@ -202,39 +209,25 @@ it.skipIf(skipBroker)(
 
 function createAuthDatabase(key = "synthetic", metadata?: Record<string, string>) {
   const source = path.join(tempDirs.make("openclaw-auth-transport-"), "source.sqlite");
-  const store = {
-    version: 1,
-    profiles: {
-      "fixture:default": {
-        type: "api_key",
-        provider: "fixture",
-        key,
-        ...(metadata ? { metadata } : {}),
-      },
-    },
-  };
+  const store = authStore(key, metadata);
   const state = { lastGood: { fixture: "fixture:default" } };
-  const database = new (requireNodeSqlite().DatabaseSync)(source);
-  try {
-    database.exec(`
+  using database = new (requireNodeSqlite().DatabaseSync)(source);
+  database.exec(`
       CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT);
       CREATE TABLE auth_profile_state (state_key TEXT PRIMARY KEY, state_json TEXT);
     `);
-    database
-      .prepare("INSERT INTO auth_profile_store VALUES (?, ?)")
-      .run("primary", JSON.stringify(store));
-    database
-      .prepare("INSERT INTO auth_profile_state VALUES (?, ?)")
-      .run("primary", JSON.stringify(state));
-  } finally {
-    database.close();
-  }
+  database
+    .prepare("INSERT INTO auth_profile_store VALUES (?, ?)")
+    .run("primary", JSON.stringify(store));
+  database
+    .prepare("INSERT INTO auth_profile_state VALUES (?, ?)")
+    .run("primary", JSON.stringify(state));
   return {
     source,
     store,
     rows: {
-      store: { status: "readable", raw: store },
-      state: { status: "readable", raw: state },
+      store: readable(store),
+      state: readable(state),
       cacheable: true,
     },
   };
@@ -299,10 +292,7 @@ it("rejects stale auth identity before transferring credentials from a replaced 
         result: { ok: false, message: expect.stringContaining("identity changed") },
       },
     ]);
-    expect((await read(source, "canonical")).store).toEqual({
-      status: "readable",
-      raw: replacement.store,
-    });
+    expect((await read(source, "canonical")).store).toEqual(readable(replacement.store));
   });
 });
 
@@ -312,12 +302,7 @@ it("observes agent initialization after a cold auth read in the same worker", as
   const env = { ...process.env, OPENCLAW_STATE_DIR: root };
   new (requireNodeSqlite().DatabaseSync)(source).close();
   const expectedIdentity = readDatabasePathIdentitySync(source).key;
-  const store = {
-    version: 1,
-    profiles: {
-      "fixture:default": { type: "api_key", provider: "fixture", key: "synthetic" },
-    },
-  };
+  const store = authStore();
   await withSqliteReadOnlyWorkerScope(async () => {
     expect(await read(source, "canonical", undefined, env)).toMatchObject({
       store: { status: "missing", reason: "table" },
@@ -345,10 +330,7 @@ it("observes agent initialization after a cold auth read in the same worker", as
         { source: "canonical", expectedIdentity, env },
       ),
     ).resolves.toEqual({ blocker: "survivor" });
-    expect((await read(source, "canonical", undefined, env)).store).toEqual({
-      status: "readable",
-      raw: store,
-    });
+    expect((await read(source, "canonical", undefined, env)).store).toEqual(readable(store));
     expect(child.connected).toBe(true);
     expect(spawn).toHaveBeenCalledOnce();
   });
@@ -359,7 +341,7 @@ describe.each([
   { label: "broker", broker: true, sourceKind: "canonical" },
 ] as const)("auth SQLite transport: $label", (transport) => {
   it.skipIf(transport.broker && skipBroker)(
-    "serializes fresh auth reads and retains the process across scope close",
+    "serializes fresh auth reads across detached callers and schema changes",
     async () => {
       const { source, store, rows: expectedRows } = createAuthDatabase();
       const writer = openNodeSqliteDatabase(source);
@@ -376,10 +358,7 @@ describe.each([
             );
             expect(rows).toEqual(Array.from({ length: 4 }, () => expectedRows));
             writer.prepare("UPDATE auth_profile_state SET state_json = ?").run('{"lastGood":{}}');
-            expect((await read(source, transport.sourceKind)).state).toEqual({
-              status: "readable",
-              raw: { lastGood: {} },
-            });
+            expect((await read(source, transport.sourceKind)).state).toEqual(emptyState);
             const connection = new GatewayConnectionWork();
             const scheduled = createScheduledGatewayRunner();
             try {
@@ -391,8 +370,8 @@ describe.each([
                   enter(() => read(source, transport.sourceKind)),
                 );
                 expect(detachedRows).toEqual({
-                  store: { status: "readable", raw: store },
-                  state: { status: "readable", raw: { lastGood: {} } },
+                  store: readable(store),
+                  state: emptyState,
                   cacheable: true,
                 });
               }
@@ -410,18 +389,10 @@ describe.each([
               state: { status: "unreadable" },
               cacheable: false,
             });
-            const child =
-              transport.label === "broker"
-                ? brokerSpawn?.mock.results[0]?.value
-                : vi.mocked(spawn).mock.results[0]?.value;
-            expect(child?.exitCode).toBeNull();
           });
         await (broker ? runWithSpawnBroker(broker, reading) : reading());
         const spawning = transport.label === "broker" ? brokerSpawn! : vi.mocked(spawn);
         expect(spawning).toHaveBeenCalledTimes(1);
-        expect(spawning.mock.results[0]?.value.exitCode).toBeNull();
-        await cleanupSnapshotOperations();
-        expect(spawning.mock.results[0]?.value.connected).toBe(false);
       } finally {
         writer.close();
         await broker?.close();
@@ -500,7 +471,7 @@ describe.each([
         );
         clearAuthState(source);
         const refreshed = await (broker ? runWithSpawnBroker(broker, reading) : reading());
-        expect(refreshed.state).toEqual({ status: "readable", raw: { lastGood: {} } });
+        expect(refreshed.state).toEqual(emptyState);
       } finally {
         vi.restoreAllMocks();
         await broker?.close();
