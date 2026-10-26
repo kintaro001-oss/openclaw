@@ -116,9 +116,9 @@ export class RealtimeTalkMediaStreamMeter {
       source.connect(analyser);
       this.releaseVisibility = listen(document, "visibilitychange", () => {
         // Shared contexts also capture audio. Only the decorative context may pause.
-        const context = this.context;
-        if (this.ownsContext && context) {
-          void (document.hidden ? context.suspend() : context.resume()).catch(() => {});
+        const meterContext = this.context;
+        if (this.ownsContext && meterContext) {
+          void (document.hidden ? meterContext.suspend() : meterContext.resume()).catch(() => {});
         }
         this.updateSampling();
       });

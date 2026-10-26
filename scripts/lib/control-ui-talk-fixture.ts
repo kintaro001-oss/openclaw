@@ -259,7 +259,7 @@ export async function installTalkPerfFixture(page: Page, includeCounters: boolea
       };
       window.openclawTalkBench = proof;
       // Preserve the native method; call() below supplies the audio element receiver.
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+      // oxlint-disable-next-line typescript/unbound-method
       const nativePlay = HTMLMediaElement.prototype.play;
       HTMLMediaElement.prototype.play = async function () {
         // Exercise native playback without playing synthetic tones through the host's speakers.
@@ -271,7 +271,7 @@ export async function installTalkPerfFixture(page: Page, includeCounters: boolea
         proof.playbackStartLatenciesMs[index] = performance.now() - startedAt;
       };
       // The original native method is called below with its analyser receiver.
-      // eslint-disable-next-line @typescript-eslint/unbound-method
+      // oxlint-disable-next-line typescript/unbound-method
       const nativeAnalyse = AnalyserNode.prototype.getFloatTimeDomainData;
       AnalyserNode.prototype.getFloatTimeDomainData = function (samples) {
         if (observing) {
