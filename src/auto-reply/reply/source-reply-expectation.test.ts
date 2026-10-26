@@ -36,23 +36,23 @@ describe("exec completion reply expectation", () => {
   it.each([
     {
       name: "webchat exec wake",
-      ctx: { Provider: "webchat", InputProvenance: exec },
+      turn: { Provider: "webchat", InputProvenance: exec },
       expected: "optional",
     },
     {
       name: "subagent exec wake",
-      ctx: { Provider: "webchat", SessionKey: "agent:main:subagent:child", InputProvenance: exec },
+      turn: { Provider: "webchat", SessionKey: "agent:main:subagent:child", InputProvenance: exec },
       expected: "result-required",
     },
     {
       name: "webchat restart recovery",
-      ctx: {
+      turn: {
         Provider: "webchat",
         InputProvenance: { kind: "internal_system", sourceTool: "main_session_restart_recovery" },
       },
       expected: "result-required",
     },
-  ] as const)("selects $expected for $name", ({ ctx, expected }) => {
-    expect(resolveSourceReplyExpectation({ ctx, cfg: {} })).toBe(expected);
+  ] as const)("selects $expected for $name", ({ turn, expected }) => {
+    expect(resolveSourceReplyExpectation({ ctx: turn, cfg: {} })).toBe(expected);
   });
 });
