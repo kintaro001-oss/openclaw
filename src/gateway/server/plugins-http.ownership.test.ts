@@ -1,17 +1,14 @@
 import type { IncomingMessage } from "node:http";
 import { PassThrough } from "node:stream";
 import { setImmediate } from "node:timers/promises";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { createPluginRuntimeCapabilityLease } from "../../plugins/capability-lease.js";
 import {
   createPluginHttpRouteHandoff,
   registerPluginHttpRoute,
   withPluginHttpRouteRegistry,
 } from "../../plugins/http-registry.js";
-import {
-  getPluginInstance,
-  type PluginInstanceHandle,
-} from "../../plugins/plugin-instance-scope.js";
+import { getPluginInstance } from "../../plugins/plugin-instance-scope.js";
 import { projectPluginContributions } from "../../plugins/registry-contributions.js";
 import { createTestPluginRegistry } from "../../plugins/registry-runtime.test-helpers.js";
 import { createEmptyPluginRegistry, type PluginRegistry } from "../../plugins/registry.js";
@@ -24,7 +21,6 @@ import {
   createGatewayPluginUpgradeHandler,
 } from "./plugins-http.js";
 
-const instances = new Set<PluginInstanceHandle>();
 const routeDefaults = { path: "/owned", auth: "plugin" as const };
 type Route = Parameters<typeof registerPluginHttpRoute>[0];
 type Handler = () => boolean | Promise<boolean>;
@@ -39,7 +35,9 @@ function createOwner(id = "shared-route", route?: OwnedRoute) {
     api.registerHttpRoute({ ...routeDefaults, ...route });
   }
   const instance = getPluginInstance(record)!;
-  instances.add(instance);
+  onTestFinished(async () => {
+    await instance.dispose();
+  });
   return { registry: builder.registry, record, api, instance };
 }
 
@@ -70,29 +68,17 @@ async function dispatch(registry: PluginRegistry, transport: "HTTP" | "WebSocket
   const req = { url: "/owned", method: "GET", headers: {} } as IncomingMessage;
   const response = makeMockHttpResponse();
   const socket = new PassThrough();
-  const context = {
-    gatewayAuthSatisfied: true,
-    gatewayRequestOperatorScopes: ["operator.read"],
-    gatewayRequestAuth: { authMethod: "token" as const, trustDeclaredOperatorScopes: false },
-  };
-  const http = createGatewayPluginRequestHandler({ registry, log });
-  const upgrade = createGatewayPluginUpgradeHandler({ registry, log });
   try {
     if (transport === "HTTP") {
-      await http(req, response.res, undefined, context);
+      await createGatewayPluginRequestHandler({ registry, log })(req, response.res);
     } else {
-      await upgrade(req, socket, Buffer.alloc(0), undefined, context);
+      await createGatewayPluginUpgradeHandler({ registry, log })(req, socket, Buffer.alloc(0));
     }
     return { ...response, warnings: warn.mock.calls, socketDestroyed: socket.destroyed };
   } finally {
     socket.destroy();
   }
 }
-
-afterEach(async () => {
-  await Promise.all([...instances].map((instance) => instance.dispose()));
-  instances.clear();
-});
 
 it.each(["HTTP", "WebSocket"] as const)(
   "retains shared %s owner after retirement",
