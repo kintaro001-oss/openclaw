@@ -5,7 +5,7 @@ import {
   verifyChannelMessageLiveFinalizerProofs,
   verifyChannelMessageReceiveAckPolicyAdapterProofs,
   verifyDurableFinalCapabilityProofs,
-} from "../../plugin-sdk/channel-outbound.js";
+} from "./contracts.js";
 import { durableFinalDeliveryCapabilities } from "./types.js";
 
 function expectProofs(

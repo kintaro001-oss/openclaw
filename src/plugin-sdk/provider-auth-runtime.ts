@@ -8,7 +8,10 @@ import {
 } from "../agents/auth-profiles/store-runtime.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { OpenClawConfig } from "../config/config.js";
-import { startOAuthLoopbackCallbackServer } from "../infra/oauth-loopback-callback.js";
+import {
+  startOAuthLoopbackCallbackServer,
+  type OAuthLoopbackCallbackServer,
+} from "../infra/oauth-loopback-callback.js";
 import { warnPluginSdkDeprecation } from "../plugins/sdk-deprecation.js";
 import { renderOAuthPage } from "../shared/oauth-page.js";
 
@@ -46,7 +49,11 @@ export type OAuthCallbackResult = {
  * Binds a hardened loopback listener before returning so provider plugins can open the browser
  * only after the callback route is ready. Invalid request candidates remain nonterminal.
  */
-export { startOAuthLoopbackCallbackServer as startProviderOAuthLoopbackCallbackServer };
+export async function startProviderOAuthLoopbackCallbackServer(
+  params: Parameters<typeof startOAuthLoopbackCallbackServer>[0],
+): Promise<OAuthLoopbackCallbackServer> {
+  return await startOAuthLoopbackCallbackServer(params);
+}
 
 /**
  * Non-secret auth profile metadata used by provider discovery helpers.

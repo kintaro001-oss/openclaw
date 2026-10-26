@@ -12,7 +12,7 @@ import {
   projectConfigAccountIdWarningCollector,
   buildOpenGroupPolicyConfigureRouteAllowlistWarning,
   buildOpenGroupPolicyRestrictSendersWarning,
-} from "../../plugin-sdk/channel-policy.js";
+} from "./group-policy-warnings.js";
 
 const restrictSenders = {
   surface: "Example groups",

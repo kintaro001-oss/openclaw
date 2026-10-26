@@ -3,7 +3,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   resolveChannelDraftStreamingChunking,
   type ChannelDraftStreamingChunking,
-} from "../plugin-sdk/channel-outbound.js";
+} from "./draft-streaming-chunking.js";
 
 const defaults: ChannelDraftStreamingChunking = {
   minChars: 200,

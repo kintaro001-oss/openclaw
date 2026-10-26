@@ -66,6 +66,7 @@ import {
 import {
   resolveAnnounceOrigin,
   resolveSubagentCompletionOrigin,
+  type DeliveryContext,
 } from "./subagent-announce-origin.js";
 import {
   readChildCompletionFindings,
@@ -90,6 +91,27 @@ export { captureSubagentCompletionReply } from "./subagent-announce-output.js";
 export type SubagentAnnounceFlowOutcome = NonNullable<
   SubagentAnnounceDeliveryResult["disposition"]
 >;
+
+function buildAnnounceReplyInstruction(params: {
+  requesterIsSubagent: boolean;
+  requesterOrigin: DeliveryContext | undefined;
+  completionTarget?: "parent";
+  modelRouteChange?: string;
+  preserveModelRouteNotice: boolean;
+}): string {
+  const modelRouteInstruction = !params.modelRouteChange
+    ? ""
+    : params.preserveModelRouteNotice
+      ? " Preserve any runtime-authored model-route change notice in your update."
+      : " Keep runtime-authored model-route change notices internal on this shared surface.";
+  if (params.completionTarget === "parent") {
+    return buildSubagentPrivateCompletionInstruction(params.requesterOrigin);
+  }
+  if (params.requesterIsSubagent) {
+    return `${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Convert the reviewed outcome into a concise internal orchestration update for your parent agent in your own words.${modelRouteInstruction} Keep this internal context private (don't mention system/log/stats/session details or announce type).`;
+  }
+  return `A completed subagent task is ready for parent review. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION}${modelRouteInstruction} Otherwise send a truthful user-facing update unless this exact result is already visible to the user in this same turn. Keep this internal context private (don't mention system/log/stats/session details or announce type), and do not copy the internal event text verbatim.`;
+}
 
 type SubagentAnnounceFlowParams = Omit<PendingFinalDeliveryPayload, "requesterDisplayKey"> & {
   childAgentId?: string;
@@ -511,24 +533,18 @@ async function runSubagentAnnounceFlowBound(
           params.terminalReply?.disposition === "visible"
             ? params.terminalReply.modelRouteChange
             : undefined;
-        const replyCompletionTarget = params.completionTarget;
-        // Nested and local operator parents may report the route fact. External
-        // channel parents receive it only as private orchestration context.
-        const preserveModelRouteNotice =
-          requesterIsSubagent ||
-          !completionChannel ||
-          !isDeliverableMessageChannel(completionChannel);
-        const modelRouteInstruction = !modelRouteChange
-          ? ""
-          : preserveModelRouteNotice
-            ? " Preserve any runtime-authored model-route change notice in your update."
-            : " Keep runtime-authored model-route change notices internal on this shared surface.";
-        const replyInstruction: string =
-          replyCompletionTarget === "parent"
-            ? buildSubagentPrivateCompletionInstruction(directOrigin)
-            : requesterIsSubagent
-              ? `${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Convert the reviewed outcome into a concise internal orchestration update for your parent agent in your own words.${modelRouteInstruction} Keep this internal context private (don't mention system/log/stats/session details or announce type).`
-              : `A completed subagent task is ready for parent review. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION}${modelRouteInstruction} Otherwise send a truthful user-facing update unless this exact result is already visible to the user in this same turn. Keep this internal context private (don't mention system/log/stats/session details or announce type), and do not copy the internal event text verbatim.`;
+        const replyInstruction = buildAnnounceReplyInstruction({
+          requesterIsSubagent,
+          requesterOrigin: directOrigin,
+          completionTarget: params.completionTarget,
+          modelRouteChange,
+          // Nested and local operator parents may report the route fact. External
+          // channel parents receive it only as private orchestration context.
+          preserveModelRouteNotice:
+            requesterIsSubagent ||
+            !completionChannel ||
+            !isDeliverableMessageChannel(completionChannel),
+        });
         const internalEvents: AgentInternalEvent[] = [
           {
             type: "task_completion",

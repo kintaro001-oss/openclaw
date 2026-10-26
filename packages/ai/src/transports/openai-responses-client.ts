@@ -32,6 +32,7 @@ import {
   type ResponsesContinuationRequest,
 } from "./openai-responses-continuation.js";
 import {
+  AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,
   OpenAIResponsesWebSocketPostDispatchError,
   responsesServiceTierObserver,
   type OpenAIResponsesOptions,
@@ -44,6 +45,7 @@ import {
   summarizeResponsesPayload,
 } from "./openai-responses-debug.js";
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
+import { recordResponsesInputReplay } from "./openai-responses-input-replay.js";
 import {
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
@@ -58,6 +60,7 @@ import { supportsResponsesReasoningUpdate } from "./openai-responses-reasoning-u
 import {
   createOpenAIResponsesAssistantOutput,
   createResponsesStreamWithRecovery,
+  resolveAzureOpenAIApiVersion,
 } from "./openai-responses-replay-internal.js";
 import { createResponsesRequestFetch } from "./openai-responses-request-fetch.js";
 import {
@@ -473,10 +476,7 @@ function createResponsesTransportExecutor(config: {
             finishWebSocket = websocket.finish;
             requestedTier = websocket.request.service_tier;
             websocketBaseline = websocket.fullRequest;
-            const inputReplay = websocket.inputReplay;
-            if (inputReplay) {
-              Object.assign(output, { openclawResponsesInputReplay: inputReplay });
-            }
+            recordResponsesInputReplay(output, websocket.inputReplay);
             contextUsageEligible &&= websocket.inputReplay === undefined;
             observePrompt?.(websocket.request, {
               egress: "responses-websocket",
@@ -671,7 +671,7 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
 export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
   return createResponsesTransportExecutor({
     outputApi: "azure-openai-responses",
-    firstEventTimeoutMs: 30_000,
+    firstEventTimeoutMs: AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,
     createClient: createAzureOpenAIClient,
     buildRequest: (model, context, options, metadata, replayMode) => {
       const deploymentName = resolveAzureDeploymentNameFromMap({
@@ -708,6 +708,6 @@ function createAzureOpenAIClient(
 
   return new AzureOpenAI({
     ...clientOptions,
-    apiVersion: process.env.AZURE_OPENAI_API_VERSION?.trim() || "preview",
+    apiVersion: resolveAzureOpenAIApiVersion(),
   });
 }

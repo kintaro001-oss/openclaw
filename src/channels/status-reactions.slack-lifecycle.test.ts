@@ -5,7 +5,7 @@ import {
   DEFAULT_EMOJIS,
   DEFAULT_TIMING,
   type StatusReactionAdapter,
-} from "../plugin-sdk/channel-feedback.js";
+} from "./status-reactions.js";
 const WEB_SEARCH_TOOL_EMOJI = "🔎";
 
 function createSlackMockAdapter() {

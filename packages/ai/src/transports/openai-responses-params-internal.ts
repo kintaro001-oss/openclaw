@@ -20,6 +20,8 @@ import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-bou
 import { usesNativeOpenAICodexResponsesBackend } from "./openai-completions-compat.js";
 import type { OpenAIResponsesReplayMode } from "./openai-responses-compaction-replay.js";
 import {
+  OPENAI_CODEX_RESPONSES_DEFAULT_INSTRUCTIONS,
+  OPENAI_CODEX_RESPONSES_EMPTY_INPUT_TEXT,
   OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
   type OpenAIResponsesOptions,
   type OpenAIResponsesRequestParams,
@@ -82,6 +84,14 @@ function buildOpenAIResponsesInstructionsText(context: Context): string | undefi
   return sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(context.systemPrompt));
 }
 
+// xAI /responses/compact needs the system prompt first in input, not instructions:
+// https://docs.x.ai/developers/advanced-api-usage/context-compaction
+export function buildOpenAIResponsesCompactSystemMessage(model: Model, instructions: string) {
+  const compat = getCompat(model);
+  const role = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
+  return buildResponsesInputMessage(role, [{ type: "input_text", text: instructions }]);
+}
+
 export function buildOpenAIResponsesParams(
   model: Model,
   context: Context,
@@ -116,7 +126,11 @@ export function buildOpenAIResponsesParams(
         "OpenAI Responses requires non-empty input when only systemPrompt is provided.",
       );
     }
-    messages.push(buildResponsesInputMessage("user", [{ type: "input_text", text: " " }]));
+    messages.push(
+      buildResponsesInputMessage("user", [
+        { type: "input_text", text: OPENAI_CODEX_RESPONSES_EMPTY_INPUT_TEXT },
+      ]),
+    );
   }
   const cacheRetention = resolveCacheRetention(options?.cacheRetention);
   const compat = getCompat(model);
@@ -130,7 +144,7 @@ export function buildOpenAIResponsesParams(
     : undefined;
   if (payloadPolicy.usesInstructionsField && (!instructions || instructions.trim().length === 0)) {
     instructions = usesNativeOpenAICodexResponsesBackend(model)
-      ? "Follow the user request."
+      ? OPENAI_CODEX_RESPONSES_DEFAULT_INSTRUCTIONS
       : undefined;
   }
   const params: OpenAIResponsesRequestParams = {

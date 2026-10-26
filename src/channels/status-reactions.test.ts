@@ -5,7 +5,7 @@ import {
   DEFAULT_EMOJIS,
   DEFAULT_TIMING,
   type StatusReactionAdapter,
-} from "../plugin-sdk/channel-feedback.js";
+} from "./status-reactions.js";
 
 const createEnabledController = (
   overrides: Partial<Parameters<typeof createStatusReactionController>[0]> = {},

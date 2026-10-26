@@ -14,6 +14,7 @@ import {
   OPENAI_RESPONSES_COMPACTION_REPLAY_TYPE,
   OPENAI_RESPONSES_RETAINED_COMPACTION_REPLAY_TYPE,
   OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH,
+  type OpenAIResponsesCompactionReplayState,
   type OpenAIResponsesReasoningReplayMetadata,
   type ReplayableResponseCompactionItem,
 } from "./openai-responses-contracts.js";
@@ -24,21 +25,6 @@ import {
   providerReplayContextMatches,
   type ProviderReplayContext,
 } from "./provider-replay-context.js";
-
-type OpenAIResponsesCompactedWindow =
-  | { state: "ready"; output: string; outputTokens?: number }
-  | { state: "refresh-required" };
-
-type OpenAIResponsesCompactionReplayState = ProviderReplayState & {
-  compactedWindow?: OpenAIResponsesCompactedWindow;
-} & (
-    | { type: typeof OPENAI_RESPONSES_COMPACTION_REPLAY_TYPE; baseUrlHash: string }
-    | {
-        type: typeof OPENAI_RESPONSES_RETAINED_COMPACTION_REPLAY_TYPE;
-        baseUrlHash: string;
-        replayIndex?: never;
-      }
-  );
 
 const OPENAI_RESPONSES_COMPACTION_SUPPRESSION_TYPE = "openai-responses-compaction-suppression";
 const OPENAI_RESPONSES_COMPACTION_SUPPRESSION_DATA = "rejected";

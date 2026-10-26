@@ -7,6 +7,7 @@ import { registerSessionResourceCleanup } from "../session-resources.js";
 import { prepareModelRequestBody } from "./model-request-body.js";
 import type { createOpenAIResponsesClient } from "./openai-responses-client.js";
 import {
+  DEFAULT_AZURE_OPENAI_API_VERSION,
   isPreviousResponseRejection,
   type OpenAIResponsesRequestParams,
   type ResponsesPromptObservation,
@@ -464,6 +465,10 @@ export async function createResponsesStreamWithRecovery(params: {
       },
     },
   };
+}
+
+export function resolveAzureOpenAIApiVersion(env = process.env): string {
+  return env.AZURE_OPENAI_API_VERSION?.trim() || DEFAULT_AZURE_OPENAI_API_VERSION;
 }
 
 export {

@@ -65,7 +65,7 @@ export function createMeetingVoiceCallGateway(params: {
       try {
         return (await client.request(method, requestParams, {
           timeoutMs: params.config.requestTimeoutMs,
-        })) as T;
+        })) as T; // SAFETY: The caller pairs the Gateway method with its response type, as on the local route.
       } finally {
         // Connection teardown must not replace an already-settled RPC result or error.
         await client.stopAndWait({ timeoutMs: 1_000 }).catch(() => {});
