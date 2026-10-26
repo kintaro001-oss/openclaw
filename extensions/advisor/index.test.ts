@@ -1,5 +1,5 @@
 import { setImmediate } from "node:timers/promises";
-import type { OpenClawPluginApi, PluginJsonValue } from "openclaw/plugin-sdk/plugin-entry";
+import type { OpenClawPluginApi as Api, PluginJsonValue } from "openclaw/plugin-sdk/plugin-entry";
 import {
   createGatewaySchedulerClock,
   createTestGatewayScheduler,
@@ -10,33 +10,29 @@ import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime
 import { expect, it, vi } from "vitest";
 import plugin, { DEFAULT_REVIEW_INSTRUCTIONS } from "./index.js";
 
-type AgentEventSubscription = Parameters<OpenClawPluginApi["registerAgentEventSubscription"]>[0];
+type AgentEventSubscription = Parameters<Api["registerAgentEventSubscription"]>[0];
 type EventContext = Parameters<AgentEventSubscription["handle"]>[1];
 type Hook = (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown;
 
-function setup(pluginConfig: Record<string, unknown>, reply = "NO_CHANGE") {
+async function startAdvisor(everyToolCalls = 1, reply = "NO_CHANGE", runTrigger = "user") {
+  const pluginConfig = { everyToolCalls, everyMinutes: 0 };
   const runContexts = new Map<string, PluginJsonValue>();
   let subscription: AgentEventSubscription | undefined;
   let beforeReply: Hook | undefined;
-  const registerService = vi.fn<OpenClawPluginApi["registerService"]>();
-  const forkSession = vi.fn<OpenClawPluginApi["runtime"]["subagent"]["forkSession"]>(async () => ({
-    text: reply,
-  }));
-  const steer = vi.fn<OpenClawPluginApi["session"]["workflow"]["steerActiveRun"]>(async () => ({
-    steered: true,
-  }));
+  const registerService = vi.fn<Api["registerService"]>();
+  const forkSession = vi
+    .fn<Api["runtime"]["subagent"]["forkSession"]>()
+    .mockResolvedValue({ text: reply });
+  const steer = vi
+    .fn<Api["session"]["workflow"]["steerActiveRun"]>()
+    .mockResolvedValue({ steered: true });
   const warn = vi.fn();
   const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
   const api = createTestPluginApi({
     id: "advisor",
     pluginConfig,
     logger,
-    runtime: createPluginRuntimeMock({
-      subagent: { forkSession },
-      config: {
-        current: () => ({ plugins: { entries: { advisor: { config: pluginConfig } } } }),
-      },
-    }),
+    runtime: createPluginRuntimeMock({ subagent: { forkSession } }),
     registerService,
     on: (name, handler) => {
       if (name === "before_agent_reply") {
@@ -81,12 +77,11 @@ function setup(pluginConfig: Record<string, unknown>, reply = "NO_CHANGE") {
     await clock.wake();
     await setImmediate();
   };
-  return {
+  const run = {
     forkSession,
     steer,
     warn,
     service,
-    start: () => service?.start({ config: {}, stateDir: "/tmp/advisor-test", logger, scheduler }),
     startRun: async (runId = "run-1", trigger = "user") => {
       await beforeReply?.(
         {},
@@ -110,12 +105,8 @@ function setup(pluginConfig: Record<string, unknown>, reply = "NO_CHANGE") {
       expect(forkSession).toHaveBeenCalledTimes(count);
     },
   };
-}
-
-async function startAdvisor(everyToolCalls = 1, reply = "NO_CHANGE", trigger = "user") {
-  const run = setup({ everyToolCalls, everyMinutes: 0 }, reply);
-  await run.start();
-  await run.startRun("run-1", trigger);
+  await service?.start({ config: {}, stateDir: "/tmp/advisor-test", logger, scheduler });
+  await run.startRun("run-1", runTrigger);
   return run;
 }
 
@@ -193,16 +184,17 @@ it.each([false, true])("cancels in-flight reviews at run end (aborted=%s)", asyn
   await run.tool();
   const review = run.flush();
   await vi.waitFor(() => expect(run.forkSession).toHaveBeenCalledOnce());
-  expect(run.forkSession.mock.calls[0]?.[0].signal?.aborted).toBe(false);
+  const signal = run.forkSession.mock.calls[0]?.[0].signal;
+  expect(signal?.aborted).toBe(false);
   await run.endRun("run-1", aborted);
   await review;
-  expect(run.forkSession.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+  expect(signal?.aborted).toBe(true);
   expect(run.steer).not.toHaveBeenCalled();
   expect(run.warn).not.toHaveBeenCalled();
 });
 
-it("registers nothing when both triggers are off", () => {
-  const run = setup({ everyToolCalls: 0, everyMinutes: 0 });
+it("registers nothing when both triggers are off", async () => {
+  const run = await startAdvisor(0);
   expect(run.service).toBeUndefined();
   expect(run.warn).toHaveBeenCalledOnce();
 });
