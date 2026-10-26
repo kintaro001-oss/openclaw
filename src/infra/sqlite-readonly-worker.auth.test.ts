@@ -68,43 +68,65 @@ function disableNativeWatcher() {
   });
 }
 
-it.skipIf(skipBroker)(
-  "reuses the Gateway reader through detached observations and retained-state restart",
-  async () => {
+it.skipIf(skipBroker).each(["existing", "late-discovered"] as const)(
+  "keeps %s auth directories on Gateway readers through caller close and restart",
+  async (discovery) => {
     disableNativeWatcher();
-    const { source, store } = createAuthDatabase();
-    const writer = openNodeSqliteDatabase(source);
-    admitSqliteSchema(writer);
     const broker = createSpawnBrokerHost();
     const scope = createSqliteReadOnlyWorkerScope();
-    const restartedScope = createSqliteReadOnlyWorkerScope();
+    const otherScope = createSqliteReadOnlyWorkerScope();
+    const initial = discovery === "existing" ? createAuthDatabase() : undefined;
     let publication: ReturnType<typeof watchAuthProfileNativeCommits> | undefined;
     let pendingRefresh: Promise<void> | undefined;
     const observed: unknown[] = [];
     const fallbackObserved = createDeferredCore();
-    let refresh = () => read(source, "canonical");
     const publishFileChange = authProfileFileChanges.onChange;
-    authProfileFileChanges.onChange = async (change) => {
-      await publishFileChange?.(change);
-      const { directory } = change;
-      if (directory !== path.dirname(source)) {
-        return;
-      }
-      const rows = await refresh();
-      observed.push(rows.store);
-      if (observed.length === 2) {
-        fallbackObserved.resolve();
-      }
-      // Credential publication can replace the observation's refresh callback.
-      refresh = () => read(source, "canonical");
-    };
     try {
       await broker.ready();
+      const enter = <T>(owner: typeof scope, run: () => T) =>
+        runWithSpawnBroker(broker, () => owner.run(run));
+      if (!initial) {
+        enter(scope, bindAuthProfileFileObservationReaders);
+      }
+      const { source, store } = initial ?? createAuthDatabase();
+      let refresh = () => read(source, "canonical");
+      authProfileFileChanges.onChange = async (change) => {
+        await publishFileChange?.(change);
+        if (change.directory !== path.dirname(source)) {
+          return;
+        }
+        observed.push((await refresh()).store);
+        if (observed.length === 2) {
+          fallbackObserved.resolve();
+        }
+        // Credential publication can replace the observation's refresh callback.
+        refresh = () => read(source, "canonical");
+      };
       vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
-      vi.setSystemTime(29_999);
       const brokerSpawn = vi.spyOn(broker, "spawn");
+      const expectShared = () => {
+        expect(brokerSpawn).toHaveBeenCalledTimes(1);
+        expect(spawn).not.toHaveBeenCalled();
+      };
       vi.mocked(spawn).mockClear();
-      runWithSpawnBroker(broker, () => scope.run(() => readAuthProfileDatabaseIdentity(source)));
+      if (!initial) {
+        enter(otherScope, () => readAuthProfileDatabaseIdentity(source));
+        await otherScope.close();
+        await runInDetachedAsyncContext(refreshAuthProfileFileState);
+        await runInDetachedAsyncContext(refreshAuthProfileFileState);
+        expect(observed).toEqual([readable(store), readable(store)]);
+        expectShared();
+        await scope.close();
+        clearAuthState(source);
+        await runInDetachedAsyncContext(refreshAuthProfileFileState);
+        expect(observed).toHaveLength(2);
+        expectShared();
+        return;
+      }
+      using writer = openNodeSqliteDatabase(source);
+      admitSqliteSchema(writer);
+      vi.setSystemTime(29_999);
+      enter(scope, () => readAuthProfileDatabaseIdentity(source));
       writer
         .prepare("UPDATE auth_profile_state SET state_json = ?")
         .run('{"lastGood":{"fixture":"fixture-next"}}');
@@ -117,28 +139,21 @@ it.skipIf(skipBroker)(
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
       clearAuthState(source);
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
-      expect(observed).toEqual([
-        readable(store),
-        readable(store),
-        readable(rotated),
-        readable(rotated),
-      ]);
-      expect(brokerSpawn).toHaveBeenCalledTimes(1);
-      expect(spawn).not.toHaveBeenCalled();
+      expect(observed).toEqual([store, store, rotated, rotated].map(readable));
+      expectShared();
       publication = watchAuthProfileNativeCommits(source);
       pendingRefresh = runInDetachedAsyncContext(refreshAuthProfileFileState);
       await scope.close();
       expect(brokerSpawn.mock.results[0]?.value.exitCode).toBeNull();
       expect(observed).toHaveLength(4);
-      runWithSpawnBroker(broker, () => restartedScope.run(bindAuthProfileFileObservationReaders));
+      enter(otherScope, bindAuthProfileFileObservationReaders);
       writer.prepare("UPDATE auth_profile_store SET store_json = ?").run(JSON.stringify(store));
       publication.dispose();
       await pendingRefresh;
       expect(observed).toHaveLength(5);
       expect(observed[4]).toEqual(readable(store));
-      expect(brokerSpawn).toHaveBeenCalledTimes(1);
-      expect(spawn).not.toHaveBeenCalled();
-      await restartedScope.close();
+      expectShared();
+      await otherScope.close();
       expect(brokerSpawn.mock.results[0]?.value.exitCode).toBeNull();
       clearAuthState(source);
       await runInDetachedAsyncContext(refreshAuthProfileFileState);
@@ -150,58 +165,7 @@ it.skipIf(skipBroker)(
       authProfileFileChanges.onChange = publishFileChange;
       await closeOpenClawStateDatabaseAsync();
       await scope.close();
-      await restartedScope.close();
-      await broker.close();
-      writer.close();
-    }
-  },
-);
-
-it.skipIf(skipBroker)(
-  "keeps late-discovered auth directories on the bound Gateway readers",
-  async () => {
-    disableNativeWatcher();
-    const broker = createSpawnBrokerHost();
-    const gatewayReaders = createSqliteReadOnlyWorkerScope();
-    const callerReaders = createSqliteReadOnlyWorkerScope();
-    const publishFileChange = authProfileFileChanges.onChange;
-    const observed: unknown[] = [];
-    try {
-      await broker.ready();
-      const brokerSpawn = vi.spyOn(broker, "spawn");
-      vi.mocked(spawn).mockClear();
-      runWithSpawnBroker(broker, () => gatewayReaders.run(bindAuthProfileFileObservationReaders));
-      const { source, store } = createAuthDatabase();
-      vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
-      authProfileFileChanges.onChange = async (change) => {
-        await publishFileChange?.(change);
-        if (change.directory === path.dirname(source)) {
-          observed.push((await read(source, "canonical")).store);
-        }
-      };
-      runWithSpawnBroker(broker, () =>
-        callerReaders.run(() => readAuthProfileDatabaseIdentity(source)),
-      );
-      await callerReaders.close();
-
-      await runInDetachedAsyncContext(refreshAuthProfileFileState);
-      await runInDetachedAsyncContext(refreshAuthProfileFileState);
-      expect(observed).toEqual([readable(store), readable(store)]);
-      expect(brokerSpawn).toHaveBeenCalledTimes(1);
-      expect(spawn).not.toHaveBeenCalled();
-
-      await gatewayReaders.close();
-      clearAuthState(source);
-      await runInDetachedAsyncContext(refreshAuthProfileFileState);
-      expect(observed).toHaveLength(2);
-      expect(brokerSpawn).toHaveBeenCalledTimes(1);
-      expect(spawn).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-      authProfileFileChanges.onChange = publishFileChange;
-      await closeOpenClawStateDatabaseAsync();
-      await callerReaders.close();
-      await gatewayReaders.close();
+      await otherScope.close();
       await broker.close();
     }
   },

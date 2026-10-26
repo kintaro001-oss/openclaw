@@ -302,53 +302,34 @@ describe("gateway lock", () => {
     },
   );
 
-  it("assigns a new verified owner identity whenever the gateway lock is reacquired", async () => {
+  it("reacquires with a new identity and matching discovery projections", async () => {
     const env = await makeEnv();
-    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockImplementation(() => [
+    vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessCmdline").mockReturnValue([
       "openclaw-gateway",
     ]);
-    const options = {
-      platform: "darwin" as const,
-      port: 48789,
+    const options = { env, lockDir: resolveTestLockDir(env), platform: "darwin" as const };
+    const firstLock = expectGatewayLock(await acquireForTest(env, { ...options, port: 48789 }));
+    const first = await readActiveGatewayLockIdentity(options);
+    const namespace = {
+      host: os.hostname(),
+      platform: process.platform,
+      identity: expect.any(String),
+      ...(process.platform === "linux"
+        ? { pidNsInode: fsSync.statSync("/proc/self/ns/pid", { bigint: true }).ino.toString() }
+        : {}),
     };
-    const firstLock = expectGatewayLock(await acquireForTest(env, options));
-    const firstConfigPayload = JSON.parse(await fs.readFile(firstLock.lockPath, "utf8")) as {
-      ownerId?: string;
-      cronOwnerProjection?: string;
-      processNamespace?: unknown;
-    };
-    const firstStatePayload = JSON.parse(await fs.readFile(firstLock.stateLockPath, "utf8")) as {
-      ownerId?: string;
-      cronOwnerProjection?: string;
-      processNamespace?: unknown;
-    };
-    const firstIdentity = await readActiveGatewayLockIdentity({
-      env,
-      lockDir: resolveTestLockDir(env),
-      platform: "darwin",
-    });
-    expect(firstConfigPayload.ownerId).toBe(firstStatePayload.ownerId);
-    expect(firstConfigPayload.cronOwnerProjection).toBe("dynamic-default-v1");
-    expect(firstStatePayload.cronOwnerProjection).toBe("dynamic-default-v1");
-    for (const payload of [firstConfigPayload, firstStatePayload]) {
-      expect(payload.processNamespace).toEqual({
-        host: os.hostname(),
-        platform: process.platform,
-        identity: expect.any(String),
-        ...(process.platform === "linux"
-          ? { pidNsInode: fsSync.statSync("/proc/self/ns/pid", { bigint: true }).ino.toString() }
-          : {}),
+    for (const pathname of [firstLock.lockPath, firstLock.stateLockPath]) {
+      const payload = JSON.parse(await fs.readFile(pathname, "utf8"));
+      expect(payload).toMatchObject({
+        ownerId: first?.ownerId,
+        cronOwnerProjection: "dynamic-default-v1",
       });
+      expect(payload.processNamespace).toEqual(namespace);
     }
     await firstLock.release();
-
-    await withLock(env, options, async () => {
-      const secondIdentity = await readActiveGatewayLockIdentity({
-        env,
-        lockDir: resolveTestLockDir(env),
-        platform: "darwin",
-      });
-      for (const identity of [firstIdentity, secondIdentity]) {
+    await withLock(env, { ...options, port: 48789 }, async () => {
+      const second = await readActiveGatewayLockIdentity(options);
+      for (const identity of [first, second]) {
         expect(identity).toMatchObject({
           pid: process.pid,
           ownerId: expect.any(String),
@@ -356,10 +337,8 @@ describe("gateway lock", () => {
           port: 48789,
         });
       }
-      expect(secondIdentity?.ownerId).not.toBe(firstIdentity?.ownerId);
-      await expect(
-        readActiveGatewayLockPort({ env, lockDir: resolveTestLockDir(env), ...options }),
-      ).resolves.toBe(48789);
+      expect(second?.ownerId).not.toBe(first?.ownerId);
+      await expect(readActiveGatewayLockPort(options)).resolves.toBe(48789);
     });
   });
 
