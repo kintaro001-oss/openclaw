@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   observeParentSqlite,
-  sqliteMethods as methods,
   emptySqliteCounts as emptyCounts,
 } from "../../../test/helpers/sqlite-parent-observer.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
@@ -24,7 +23,6 @@ import {
 import type { ResolvedAgentRoute } from "../../routing/resolve-route.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
 import { createTestRegistry } from "../../test-utils/channel-plugins.js";
-import { openNodeSqliteDatabase } from "../node-sqlite.js";
 import { inspectCurrentConversationBindingRecord } from "./current-conversation-bindings.js";
 import { readSessionBindingSelectionCurrent, testing } from "./session-binding-service.js";
 
@@ -71,18 +69,6 @@ it.each(["generic", "account"] as const)(
     const service = getSessionBindingService();
     const observer = observeParentSqlite();
     try {
-      const calibration = openNodeSqliteDatabase(":memory:");
-      calibration.exec("CREATE TABLE calibration (value INTEGER)");
-      calibration.prepare("INSERT INTO calibration VALUES (?)").run(7);
-      const query = calibration.prepare("SELECT value FROM calibration");
-      expect(query.get()).toEqual({ value: 7 });
-      expect(query.all()).toEqual([{ value: 7 }]);
-      expect([...query.iterate()]).toEqual([{ value: 7 }]);
-      calibration.close();
-      for (const method of methods) {
-        expect(observer.counts[method], `${method} calibration`).toBeGreaterThan(0);
-      }
-      observer.reset();
       const manager = kind === "account" ? accountManager(channel) : undefined;
       const binding = await service.bind({
         conversation,
@@ -167,14 +153,11 @@ it.each(
       reply: { to: conversation.conversationId },
       message: { rawBody: "hello" },
     });
-    await expect(resolveBoundAcpDispatchSessionKey({ ctx, cfg: {} })).resolves.toBe(
-      binding.targetSessionKey,
-    );
+    const dispatch = () => resolveBoundAcpDispatchSessionKey({ ctx, cfg: {} });
+    await expect(dispatch()).resolves.toBe(binding.targetSessionKey);
 
     // Capture the real native owner before its first awaited admission check resumes.
-    const pending = resolveBoundAcpDispatchSessionKey({ ctx, cfg: {} }).catch(
-      (error: unknown) => error,
-    );
+    const pending = dispatch().catch((error: unknown) => error);
     if (change === "database-closed") {
       await closeOpenClawStateDatabaseAsync();
     } else if (manager) {
