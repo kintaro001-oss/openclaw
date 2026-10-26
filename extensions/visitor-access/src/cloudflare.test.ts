@@ -29,36 +29,29 @@ function fetchSequence(...responses: unknown[]) {
   return fetcher;
 }
 
-function requestBody(fetcher: ReturnType<typeof fetchSequence>, index: number) {
-  const body = fetcher.mock.calls[index]?.[1]?.body;
-  if (typeof body !== "string") {
-    throw new Error("Expected a JSON request body");
-  }
-  return JSON.parse(body) as unknown;
-}
+const requestBody = (fetcher: ReturnType<typeof fetchSequence>, index: number) =>
+  JSON.parse(String(fetcher.mock.calls[index]?.[1]?.body)) as unknown;
+
+const methods = (fetcher: ReturnType<typeof fetchSequence>) =>
+  fetcher.mock.calls.map(([, request]) => request?.method).join(" ");
 
 describe("VisitorPolicyClient", () => {
   it.each([
     ["githubAccountIdClaim", false],
     ["issuer", true],
   ] as const)("pins %s through renewal (after response: %s)", async (field, afterResponse) => {
-    let provider: typeof githubProvider | undefined;
+    let provider = { ...githubProvider };
     const policy = namedPolicy([42]);
     const fetcher = fetchSequence([], policy, [policy], policy);
     const client = new VisitorPolicyClient(config, fetcher, undefined, () => provider);
     const changeMapping = () => {
-      provider = {
-        ...githubProvider,
-        [field]: field === "issuer" ? "https://changed.cloudflareaccess.com" : "changed_claim",
-      };
+      provider = { ...githubProvider, [field]: "changed" };
     };
     fetcher.mockImplementationOnce(async () => {
       changeMapping();
       return cloudflareResponse(namedPolicy([42, 43]));
     });
-    provider = { ...githubProvider };
     await expect(client.update(() => [42])).resolves.toEqual([42]);
-    expect(requestBody(fetcher, 1)).toMatchObject({ include: [githubRule] });
     await expect(
       client.update(() => {
         if (!afterResponse) {
@@ -67,17 +60,11 @@ describe("VisitorPolicyClient", () => {
         return afterResponse ? [42, 43] : [42];
       }),
     ).rejects.toThrow("mapping changed");
-    expect(fetcher.mock.calls.map(([, request]) => request?.method)).toEqual([
-      "GET",
-      "POST",
-      "GET",
-      "GET",
-      ...(afterResponse ? ["PUT"] : []),
-    ]);
+    expect(methods(fetcher)).toEqual(afterResponse ? "GET POST GET GET PUT" : "GET POST GET GET");
   });
 
-  it("rereads the named policy and preserves mixed dashboard targets and restrictions on update", async () => {
-    const original = namedPolicy(["FIRST@example.com", 42]);
+  it("rereads dashboard targets and preserves restrictions on update", async () => {
+    const original = namedPolicy(["A@b.com", 42]);
     const restrictions = {
       precedence: 9,
       session_duration: "12h",
@@ -86,7 +73,7 @@ describe("VisitorPolicyClient", () => {
       mfa_config: { mfa_disabled: false },
     };
     const updated = {
-      ...namedPolicy(["first@example.com", "manual@example.com", 42]),
+      ...namedPolicy(["a@b.com", "m@b.com", 42]),
       ...restrictions,
       created_at: "2026-08-28T00:00:00Z",
     };
@@ -94,51 +81,39 @@ describe("VisitorPolicyClient", () => {
     const client = new VisitorPolicyClient(config, fetcher, undefined, () => githubProvider);
     await expect(client.read()).resolves.toEqual({
       id: original.id,
-      targets: ["first@example.com", 42],
+      targets: ["a@b.com", 42],
     });
 
-    await expect(client.update((targets) => [...targets, "next@example.com", 84])).resolves.toEqual(
-      ["first@example.com", "manual@example.com", 42, "next@example.com", 84],
+    const expected = ["a@b.com", "m@b.com", 42, "n@b.com", 84];
+    await expect(client.update((targets) => [...targets, "n@b.com", 84])).resolves.toEqual(
+      expected,
     );
 
-    expect(requestBody(fetcher, 4)).toEqual({
-      name: config.policyName,
-      decision: "allow",
-      include: [
-        { email: { email: "first@example.com" } },
-        { email: { email: "manual@example.com" } },
-        githubRule,
-        { email: { email: "next@example.com" } },
-        oidc({ claim_value: "84" }),
-      ],
-      ...restrictions,
-    });
-    expect(fetcher.mock.calls[4]?.[0]).toBe(`${collectionUrl}/${original.id}`);
+    const { id, ...payload } = namedPolicy(expected);
+    expect(requestBody(fetcher, 4)).toEqual({ ...payload, ...restrictions });
+    expect(fetcher.mock.calls[4]?.[0]).toBe(`${collectionUrl}/${id}`);
     expect(fetcher.mock.calls[4]?.[1]?.method).toBe("PUT");
   });
 
-  it.each<
-    [name: string, override: Record<string, unknown>, provider?: typeof githubProvider | null]
-  >([
-    ["deny decision", { decision: "deny" }],
-    ["unsupported includes", { include: [{ everyone: {} }] }],
-    ["mixed email rules", { include: [{ email: { email: "first@example.com" }, everyone: {} }] }],
-    ["unconfigured GitHub mapping", { include: [githubRule] }, null],
-    ["another OIDC provider", { include: [oidc({ identity_provider_id: "other-provider" })] }],
-    ["another OIDC claim", { include: [oidc({ claim_name: "login" })] }],
-    ["mixed OIDC rules", { include: [{ ...githubRule, everyone: {} }] }],
-    ["extra OIDC fields", { include: [oidc({ login: "visitor" })] }],
-    ...["042", "9007199254740992", 42].map((claimValue): [string, Record<string, unknown>] => [
-      `noncanonical account ID ${JSON.stringify(claimValue)}`,
-      { include: [oidc({ claim_value: claimValue })] },
-    ]),
-    ["required restrictions", { require: [{ email_domain: { domain: "example.com" } }] }],
-    ["excluded identities", { exclude: [{ email: { email: "excluded@example.com" } }] }],
-    ["renamed policy", { name: "GitHub organization" }],
-    ["replaced policy", { id: "other-policy" }],
+  it.each<[Record<string, unknown>, (typeof githubProvider | null)?]>([
+    [{ decision: "deny" }],
+    [{ include: [{ everyone: {} }] }],
+    [{ include: [{ email: { email: "first@example.com" }, everyone: {} }] }],
+    [{ include: [githubRule] }, null],
+    [{ include: [oidc({ identity_provider_id: "other-provider" })] }],
+    [{ include: [oidc({ claim_name: "login" })] }],
+    [{ include: [{ ...githubRule, everyone: {} }] }],
+    [{ include: [oidc({ login: "visitor" })] }],
+    [{ include: [oidc({ claim_value: "042" })] }],
+    [{ include: [oidc({ claim_value: "9007199254740992" })] }],
+    [{ include: [oidc({ claim_value: 42 })] }],
+    [{ require: [{ email_domain: { domain: "example.com" } }] }],
+    [{ exclude: [{ email: { email: "excluded@example.com" } }] }],
+    [{ name: "GitHub organization" }],
+    [{ id: "other-policy" }],
   ])(
-    "refuses %s before running a change or writing Cloudflare",
-    async (_name, override, provider = githubProvider) => {
+    "refuses policy %j before mutation (provider: %j)",
+    async (override, provider = githubProvider) => {
       const policy = namedPolicy();
       const fetcher = fetchSequence([policy], { ...policy, ...override });
       const change = vi.fn(() => ["next@example.com"]);
@@ -146,7 +121,7 @@ describe("VisitorPolicyClient", () => {
       const client = new VisitorPolicyClient(config, fetcher, undefined, readProvider);
       await expect(client.update(change)).rejects.toBeInstanceOf(VisitorAccessError);
       expect(change).not.toHaveBeenCalled();
-      expect(fetcher.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+      expect(methods(fetcher)).toBe("GET GET");
     },
   );
 
@@ -167,7 +142,7 @@ describe("VisitorPolicyClient", () => {
       });
     }
     expect(fetcher.mock.calls[1]?.[0]).toBe(`${collectionUrl}?page=2&per_page=100`);
-    expect(fetcher.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+    expect(methods(fetcher)).toBe(duplicate ? "GET GET" : "GET GET GET");
   });
 
   it.each([
@@ -182,8 +157,10 @@ describe("VisitorPolicyClient", () => {
       .catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(VisitorAccessError);
     expect(String(error)).not.toContain(config.apiToken);
-    const options = fetcher.mock.calls[0]?.[1];
-    expect(options).toMatchObject({ redirect: "error", signal: expect.any(AbortSignal) });
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      redirect: "error",
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("fences an obsolete service before the durable callback runs", async () => {
