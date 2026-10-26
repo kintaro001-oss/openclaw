@@ -128,59 +128,68 @@ function installAppsRequestObserver() {
     preparations: [] as AppsPreparationReceipt[],
   };
   (window as AppsProbeWindow).appsCatalogProbe = state;
-  // oxlint-disable-next-line typescript/unbound-method -- The wrapper calls the original with its actual socket receiver below.
-  const send = WebSocket.prototype.send;
-  WebSocket.prototype.send = function (data) {
-    if (typeof data === "string") {
-      try {
-        const frame: unknown = JSON.parse(data);
-        if (
-          typeof frame === "object" &&
-          frame !== null &&
-          "method" in frame &&
-          typeof frame.method === "string"
-        ) {
-          const at = performance.now();
-          state.requests.push({ method: frame.method, at });
-          if (frame.method === "sessions.create" && "id" in frame && typeof frame.id === "string") {
-            const receipt: AppsPreparationReceipt = {
-              id: frame.id,
-              params: "params" in frame ? frame.params : undefined,
-              requestAt: at,
-            };
-            state.preparations.push(receipt);
-            const observeResponse = (event: MessageEvent) => {
-              if (typeof event.data !== "string") {
-                return;
-              }
-              let response: unknown;
-              try {
-                response = JSON.parse(event.data);
-              } catch {
-                return;
-              }
+  window.WebSocket = new Proxy(WebSocket, {
+    construct(target, args: ConstructorParameters<typeof WebSocket>) {
+      const socket = new target(...args);
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        if (typeof data === "string") {
+          try {
+            const frame: unknown = JSON.parse(data);
+            if (
+              typeof frame === "object" &&
+              frame !== null &&
+              "method" in frame &&
+              typeof frame.method === "string"
+            ) {
+              const at = performance.now();
+              state.requests.push({ method: frame.method, at });
               if (
-                typeof response === "object" &&
-                response !== null &&
-                "type" in response &&
-                response.type === "res" &&
-                "id" in response &&
-                response.id === receipt.id
+                frame.method === "sessions.create" &&
+                "id" in frame &&
+                typeof frame.id === "string"
               ) {
-                receipt.response = response;
-                receipt.responseAt = performance.now();
-                this.removeEventListener("message", observeResponse);
+                const receipt: AppsPreparationReceipt = {
+                  id: frame.id,
+                  params: "params" in frame ? frame.params : undefined,
+                  requestAt: at,
+                };
+                state.preparations.push(receipt);
+                const observeResponse = (event: MessageEvent) => {
+                  if (typeof event.data !== "string") {
+                    return;
+                  }
+                  let response: unknown;
+                  try {
+                    response = JSON.parse(event.data);
+                  } catch {
+                    return;
+                  }
+                  if (
+                    typeof response === "object" &&
+                    response !== null &&
+                    "type" in response &&
+                    response.type === "res" &&
+                    "id" in response &&
+                    response.id === receipt.id
+                  ) {
+                    receipt.response = response;
+                    receipt.responseAt = performance.now();
+                    socket.removeEventListener("message", observeResponse);
+                  }
+                };
+                socket.addEventListener("message", observeResponse);
               }
-            };
-            this.addEventListener("message", observeResponse);
+            }
+          } catch {
+            // Non-JSON transport frames are outside this method-only observation.
           }
         }
-      } catch {
-        // Non-JSON transport frames are outside this method-only observation.
-      }
-    }
-    return send.call(this, data);
-  };
+        return send(data);
+      };
+      return socket;
+    },
+  });
 }
 
 export async function waitForAppsCatalog(page: Page) {
