@@ -89,6 +89,28 @@ it.each(["qwen", "qwen-chat-template"] as const)("sends efforts in %s", (thinkin
   }
 });
 
+it.each(["compat", "model"] as const)("resolves %s maps and explicit disablement", (source) => {
+  const mapping = { low: "LOW", high: "HIGH" };
+  for (const supportsReasoningEffort of [true, false]) {
+    expectPayload(
+      {
+        reasoning: "high",
+        model: {
+          id: "qwen3:8b",
+          ...(source === "model" ? { thinkingLevelMap: mapping } : {}),
+          compat: {
+            thinkingFormat: "qwen-chat-template",
+            supportsReasoningEffort,
+            supportedReasoningEfforts: ["LOW", "HIGH"],
+            ...(source === "compat" ? { reasoningEffortMap: mapping } : {}),
+          },
+        },
+      },
+      { ...qwenThinking, ...(supportsReasoningEffort ? { reasoning_effort: "HIGH" } : {}) },
+    );
+  }
+});
+
 it.each(["off", "max"] as const)("maps DeepSeek %s and strips hosted fields", (reasoning) => {
   expectPayload(
     {
@@ -110,7 +132,7 @@ it.each(["off", "max"] as const)("maps DeepSeek %s and strips hosted fields", (r
 
 it.each<[PayloadCase, Record<string, unknown>]>([
   [{ format: "chat-template" }, qwenThinking],
-  [{ format: "chat-template", model: { compat: disabledEffort } }, qwenThinking],
+  [{ format: "chat-template", reasoning: "high", model: { compat: disabledEffort } }, qwenThinking],
   [
     {
       initialPayload: {

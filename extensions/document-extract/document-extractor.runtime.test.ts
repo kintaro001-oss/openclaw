@@ -116,7 +116,9 @@ it("filters selected pages and renders them in selection order", async () => {
   encodePng.mockImplementation(async (rgba: Uint8Array) =>
     Uint8Array.of(99, ...rgba, 99).subarray(1, -1),
   );
-  const result = await extract({ pageNumbers: [3, 2, 0, 1] });
+  const buffer = Buffer.from("!%PDF-1.4?").subarray(1, -1);
+  const result = await extract({ buffer, pageNumbers: [3, 2, 0, 1] });
+  expect(Buffer.from(open.mock.calls[0]?.[0] ?? [])).toEqual(buffer);
   expect(result.images.map(({ data }) => data)).toEqual(["Ag==", "AQ=="]);
   expect(result.metadata?.pages).toMatchObject({ processed: [2, 1], truncated: true });
 });

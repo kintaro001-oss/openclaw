@@ -61,7 +61,9 @@ it.each(["HTTP", "WebSocket"] as const)("drains the surviving %s owner", async (
   const entered = createDeferredCore();
   const release = createDeferredCore();
   const events: string[] = [];
+  const observed: Array<PluginRegistry | undefined> = [];
   const handler = async () => {
+    observed.push(getPluginRuntimeGatewayRequestScope()?.pluginRegistry);
     entered.resolve();
     await release.promise;
     events.push("returned");
@@ -85,6 +87,7 @@ it.each(["HTTP", "WebSocket"] as const)("drains the surviving %s owner", async (
   }
   expect(await pending).toMatchObject({ res: { statusCode: 200 }, socketDestroyed: false });
   expect(events).toEqual(["returned", "disposed"]);
+  expect(observed).toEqual([first.registry]);
 });
 
 it.each(["static", "dynamic", "anonymous"] as const)(

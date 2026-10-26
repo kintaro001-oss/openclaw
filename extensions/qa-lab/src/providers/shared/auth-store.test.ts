@@ -68,18 +68,27 @@ it.each(["old", "future", "invalid"] as const)("isolates %s host state", async (
   const staged = await Promise.all(
     ["openai", "anthropic"].map(async (provider) => {
       const stateDir = await tempDirs.makeTempDir("openclaw-qa-auth-concurrent-");
-      await stageQaMockAuthProfiles({
+      const config = await stageQaMockAuthProfiles({
         cfg: {},
         agentIds: ["qa"],
         stateDir,
         providers: [provider],
       });
-      return { stateDir, provider };
+      return { stateDir, provider, config };
     }),
   );
-  for (const { stateDir, provider } of staged) {
+  for (const { stateDir, provider, config } of staged) {
     const store = await readQaAuthProfiles(path.join(stateDir, "agents", "qa", "agent"));
     expect(Object.keys(store.profiles)).toEqual([`qa-mock-${provider}`]);
+    expect(config.auth).toEqual({
+      profiles: {
+        [`qa-mock-${provider}`]: {
+          provider,
+          mode: "api_key",
+          displayName: `QA mock ${provider} credential`,
+        },
+      },
+    });
   }
   await closeOpenClawAgentDatabasesAsync();
   await closeOpenClawStateDatabaseAsync();

@@ -76,6 +76,7 @@ it.each([
 ])("rejects conflicting command selections: %s", async (args) => {
   await expect(run(args)).rejects.toThrow(/--all-commands.*--commands/);
   expect(mocks.runNodeHost).not.toHaveBeenCalled();
+  expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
   expect(mocks.loadNodeHostConfig).not.toHaveBeenCalled();
 });
 

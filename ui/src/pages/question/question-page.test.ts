@@ -140,6 +140,13 @@ it.each(["coalesce", "retry-id", "retry-client"])("retires stale lookup (%s)", a
   await waitForSolid(() => expect(page.textContent).toContain(id));
   await questionPanelIn(page);
   expect(request).toHaveBeenCalledTimes(change === "retry-id" ? 3 : 2);
+  expect(request.mock.calls.map(([, params]) => params)).toEqual(
+    change === "retry-id"
+      ? [{ id: "q1" }, { id: "q1" }, { id: "q2" }]
+      : change === "coalesce"
+        ? [{ id: "q1" }, { id: "q2" }]
+        : [{ id: "q1" }, { id: "q1" }],
+  );
   expect(page.querySelector("main")?.getAttribute("aria-busy")).toBe("false");
   pending.reject(new Error("old lookup failed"));
   await settle(page);

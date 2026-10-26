@@ -31,7 +31,7 @@ const workdirParams: sandbox.CreateSandboxBackendParams = {
   cfg: createOpenShellBackendSandboxConfig(),
 };
 
-const registries: Array<ReturnType<typeof registerInRegistry>> = [];
+const registries: Array<ReturnType<typeof runtime.createEmptyPluginRegistry>> = [];
 
 function registerInRegistry(pluginConfig: OpenClawPluginApi["pluginConfig"]) {
   const { registry } = createPluginRegistryFixture();

@@ -8,7 +8,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-test-api";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { expect, it, vi } from "vitest";
-import plugin from "./index.js";
+import plugin, { DEFAULT_REVIEW_INSTRUCTIONS } from "./index.js";
 
 type AgentEventSubscription = Parameters<Api["registerAgentEventSubscription"]>[0];
 type EventContext = Parameters<AgentEventSubscription["handle"]>[1];
@@ -92,6 +92,12 @@ it("reviews complete tools at the threshold, rechecking queued and native calls"
   await run.tool();
   await run.send("tool", "start", { toolCallId: "late" }, 0);
   await run.send("tool", "result", { toolCallId: "late" }, 1);
+  expect(run.forkSession).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      sessionKey: "agent:main:main",
+      message: expect.stringContaining(DEFAULT_REVIEW_INSTRUCTIONS),
+    }),
+  );
   expect(run.steer).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ sessionKey: "agent:main:main", displayText: "Stop polling." }),
   );
@@ -102,13 +108,25 @@ it("reviews complete tools at the threshold, rechecking queued and native calls"
   await run.send("codex_app_server.item", "completed", native, 2);
 });
 
-it.each(["custom_tool_call", "function_call"])("settles %s after its child", async (call) => {
+it.each([
+  ["custom_tool_call", "outer", "child"],
+  ["function_call", "shared-id", "shared-id"],
+])("settles %s after its child", async (call, outerId, childId) => {
   const run = await startAdvisor();
-  const itemId = "shared-id";
-  await run.send("codex_app_server.item", "started", { itemId, type: call });
-  await run.send("tool", "start", { toolCallId: itemId, itemId });
-  await run.send("codex_app_server.item", "completed", { itemId, type: "commandExecution" }, 0);
-  await run.send("codex_app_server.item", "completed", { itemId, type: `${call}_output` }, 1);
+  await run.send("codex_app_server.item", "started", { itemId: outerId, type: call });
+  await run.send("tool", "start", { toolCallId: childId, itemId: childId });
+  await run.send(
+    "codex_app_server.item",
+    "completed",
+    { itemId: childId, type: "commandExecution" },
+    0,
+  );
+  await run.send(
+    "codex_app_server.item",
+    "completed",
+    { itemId: outerId, type: `${call}_output` },
+    1,
+  );
 });
 
 it.each(["Looks fine to me.", "CORRECTION", "NO_CHANGE"])(
