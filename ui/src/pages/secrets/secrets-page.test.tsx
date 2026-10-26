@@ -2,7 +2,7 @@ import { createSignal, Show } from "solid-js";
 import { afterEach, expect, it } from "vitest";
 import type { SecretStoreEntry } from "../../../../packages/gateway-protocol/src/index.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
-import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context-types.ts";
+import type { ApplicationContext } from "../../app/context-types.ts";
 import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import {
   createApplicationGatewaySnapshot,
@@ -12,6 +12,7 @@ import {
   createGatewayRequestMock,
   createTestGatewayClient,
 } from "../../test-helpers/gateway-client.ts";
+import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { cleanupSolid, mountSolid } from "../../test-helpers/mount-solid.ts";
 import { createSolidApplicationContextProvider } from "../../test-helpers/solid-application-context.tsx";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
@@ -33,16 +34,11 @@ function entry(name: string): SecretStoreEntry {
 }
 
 function mountPage(request: ReturnType<typeof createGatewayRequestMock>) {
-  const snapshot: ApplicationGatewaySnapshot = createApplicationGatewaySnapshot({
+  const snapshot = createApplicationGatewaySnapshot({
     client: createTestGatewayClient(request),
     phase: "connected",
     sessionKey: "main",
-    hello: {
-      type: "hello-ok",
-      protocol: 1,
-      auth: { role: "operator", scopes: ["operator.admin"] },
-      features: { methods: ["secrets.store.list", "secrets.store.set"], events: [] },
-    },
+    hello: gatewayHelloForMethods(["secrets.store.list", "secrets.store.set"]),
   });
   const source = createApplicationGateway(snapshot);
   let pathname = "/settings/secrets";
@@ -73,10 +69,34 @@ function mountPage(request: ReturnType<typeof createGatewayRequestMock>) {
     { wrapper: provider.wrapper },
   );
   flush();
+  const query = <T extends Element = HTMLElement>(selector: string) =>
+    page.container.querySelector<T>(selector)!;
+  const dialog = () => query("openclaw-modal-dialog");
+  const submit = () => query<HTMLButtonElement>('.secrets-store-dialog button[type="submit"]');
+  const input = (selector: string, value: string) => {
+    const field = query<HTMLInputElement | HTMLTextAreaElement>(selector);
+    field.value = value;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    return field;
+  };
+  const openDraft = async (name = "EXAMPLE_URL") => {
+    query<HTMLButtonElement>("button.primary").click();
+    await waitForSolid(() => expect(dialog()).not.toBeNull());
+    const field = input('input[name="name"]', name);
+    input('textarea[name="value"]', "https://example.test");
+    flush();
+    return field;
+  };
   return {
     page,
     source,
     snapshot,
+    query,
+    dialog,
+    submit,
+    openDraft,
+    waitText: (text: string) =>
+      waitForSolid(() => expect(page.container.textContent).toContain(text)),
     leaveRoute: () => {
       pathname = "/settings/profile";
       for (const listener of listeners) {
@@ -87,28 +107,10 @@ function mountPage(request: ReturnType<typeof createGatewayRequestMock>) {
   };
 }
 
-async function openExampleDraft(page: ReturnType<typeof mountSolid>) {
-  page.container.querySelector<HTMLButtonElement>("button.primary")!.click();
-  await waitForSolid(() =>
-    expect(page.container.querySelector("openclaw-modal-dialog")).not.toBeNull(),
-  );
-  for (const [selector, value] of [
-    ['input[name="name"]', "EXAMPLE_URL"],
-    ['textarea[name="value"]', "https://example.test"],
-  ] as const) {
-    const input = page.container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
-    input.value = value;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-  flush();
-  return () =>
-    page.container.querySelector<HTMLButtonElement>('.secrets-store-dialog button[type="submit"]')!;
-}
-
 it("keeps reconnect reads current and releases the Gateway binding when the page unmounts", async () => {
   const stale = createDeferred<{ entries: SecretStoreEntry[] }>();
   const previousRequest = createGatewayRequestMock(async () => stale.promise);
-  const { page, source, snapshot } = mountPage(previousRequest);
+  const { page, source, snapshot, query, dialog, openDraft, waitText } = mountPage(previousRequest);
   expect(previousRequest).toHaveBeenCalledExactlyOnceWith("secrets.store.list", {});
 
   source.publish({ ...snapshot, phase: "reconnecting" });
@@ -117,7 +119,7 @@ it("keeps reconnect reads current and releases the Gateway binding when the page
     entries: [entry("CURRENT_URL")],
   }));
   source.publish({ ...snapshot, client: createTestGatewayClient(currentRequest) });
-  await waitForSolid(() => expect(page.container.textContent).toContain("CURRENT_URL"));
+  await waitText("CURRENT_URL");
   expect(currentRequest).toHaveBeenCalledExactlyOnceWith("secrets.store.list", {});
   stale.resolve({ entries: [entry("STALE_URL")] });
   await new Promise<void>((resolve) => {
@@ -127,23 +129,11 @@ it("keeps reconnect reads current and releases the Gateway binding when the page
   expect(page.container.textContent).toContain("CURRENT_URL");
   expect(page.container.textContent).not.toContain("STALE_URL");
 
-  page.container.querySelector<HTMLButtonElement>("button.primary")!.click();
-  await waitForSolid(() =>
-    expect(page.container.querySelector("openclaw-modal-dialog")).not.toBeNull(),
-  );
-  const name = page.container.querySelector<HTMLInputElement>('input[name="name"]')!;
-  name.value = "api_token";
-  name.dispatchEvent(new Event("input", { bubbles: true }));
+  const name = await openDraft("api_token");
   await waitForSolid(() => expect(name.value).toBe("API_TOKEN"));
-  expect(page.container.querySelector<HTMLInputElement>('input[value="secret"]')!.checked).toBe(
-    true,
-  );
-  page.container
-    .querySelector<HTMLButtonElement>('.secrets-store-dialog button[type="button"]')!
-    .click();
-  await waitForSolid(() =>
-    expect(page.container.querySelector("openclaw-modal-dialog")).toBeNull(),
-  );
+  expect(query<HTMLInputElement>('input[value="secret"]').checked).toBe(true);
+  query<HTMLButtonElement>('.secrets-store-dialog button[type="button"]').click();
+  await waitForSolid(() => expect(dialog()).toBeNull());
 
   page.unmount();
   const retiredRequest = createGatewayRequestMock(async () => ({ entries: [] }));
@@ -166,25 +156,23 @@ it("retains a failed save draft, retries it, and releases pending presentation o
     }
     throw new Error(`Unexpected method: ${method}`);
   });
-  const { page, source, snapshot } = mountPage(request);
-  await waitForSolid(() => expect(page.container.textContent).toContain("SERVICE_URL"));
-  const submit = await openExampleDraft(page);
+  const { page, source, snapshot, query, dialog, submit, openDraft, waitText } = mountPage(request);
+  await waitText("SERVICE_URL");
+  await openDraft();
   submit().click();
   await waitForSolid(() => expect(submit().textContent).toContain("Saving"));
   expect(submit().disabled).toBe(true);
   firstSave.reject(new Error("Synthetic save unavailable"));
   await waitForSolid(() => expect(submit().disabled).toBe(false));
   expect(page.container.textContent).toContain("Synthetic save unavailable");
-  expect(page.container.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe(
-    "EXAMPLE_URL",
-  );
+  expect(query<HTMLInputElement>('input[name="name"]').value).toBe("EXAMPLE_URL");
   submit().click();
   await waitForSolid(() => expect(submit().disabled).toBe(true));
   expect(saveCount).toBe(2);
   const replacement = createGatewayRequestMock(async () => ({ entries: [entry("CURRENT_URL")] }));
   source.publish({ ...snapshot, client: createTestGatewayClient(replacement) });
-  await waitForSolid(() => expect(page.container.textContent).toContain("CURRENT_URL"));
-  expect(page.container.querySelector("openclaw-modal-dialog")).toBeNull();
+  await waitText("CURRENT_URL");
+  expect(dialog()).toBeNull();
   secondSave.reject(new Error("Retired save unavailable"));
   await Promise.resolve();
   flush();
@@ -196,15 +184,13 @@ it("releases route teardown while an admitted save is still pending", async () =
   const request = createGatewayRequestMock(async (method) =>
     method === "secrets.store.set" ? save.promise : { entries: [entry("SERVICE_URL")] },
   );
-  const { page, leaveRoute } = mountPage(request);
-  await waitForSolid(() => expect(page.container.textContent).toContain("SERVICE_URL"));
-  const submit = await openExampleDraft(page);
+  const { page, query, submit, openDraft, waitText, leaveRoute } = mountPage(request);
+  await waitText("SERVICE_URL");
+  await openDraft();
   submit().click();
   await waitForSolid(() => expect(submit().disabled).toBe(true));
   leaveRoute();
-  await waitForSolid(() =>
-    expect(page.container.querySelector("openclaw-secrets-page")).toBeNull(),
-  );
+  await waitForSolid(() => expect(query("openclaw-secrets-page")).toBeNull());
   save.reject(new Error("Retired route save unavailable"));
   await Promise.resolve();
   flush();
