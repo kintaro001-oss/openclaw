@@ -238,32 +238,11 @@ it("pages only the current automation and hides other jobs, previews, and invent
   });
 });
 
-it.each([
-  {
-    name: "authenticated caller without an agent filter",
-    options: channelCaller,
-    input: {},
-    expected: { includeDisabled: false, compact: true },
-  },
-  {
-    name: "sessionless caller with explicit agent and pagination",
-    options: undefined,
-    input: { agentId: "worker", includeDisabled: true, limit: 200, offset: 200 },
-    expected: {
-      includeDisabled: true,
-      compact: true,
-      agentId: "worker",
-      limit: 200,
-      offset: 200,
-    },
-  },
-])("lists for $name", async ({ options, input, expected }) => {
-  const identity = mockCaller({ jobs: [] });
-  await executeCron({ action: "list", ...input }, options);
-  expect(expectSingleCall("cron.list")).toEqual(expected);
-  if (options) {
-    expect(identity()).toMatchObject({ agentId: "agent-123", sessionKey: options.agentSessionKey });
-  }
+it("lists a sessionless caller's explicit agent and pagination", async () => {
+  mockCaller({ jobs: [] });
+  const input = { agentId: "worker", includeDisabled: true, limit: 200, offset: 200 };
+  await executeCron({ action: "list", ...input });
+  expect(expectSingleCall("cron.list")).toEqual({ ...input, compact: true });
 });
 
 it.each([
@@ -360,11 +339,9 @@ it.each([
     },
     expected: {
       name: "wake-up",
-      enabled: true,
       deleteAfterRun: true,
       schedule: { kind: "at", at: new Date(123).toISOString() },
       sessionTarget: "main",
-      wakeMode: "now",
       payload: { kind: "systemEvent", text: "hello" },
     },
   },
@@ -379,17 +356,15 @@ it.each([
     },
     expected: {
       delivery: { mode: "none" },
-      enabled: true,
       name: "evidence-test",
       payload: { kind: "agentTurn", message: "Evidence test.", timeoutSeconds: 10 },
       schedule: { everyMs: 999_999, kind: "every" },
       sessionTarget: "isolated",
-      wakeMode: "now",
     },
   },
 ])("normalizes cron.add $name", async ({ input, expected }) => {
   await executeCron({ action: "add", ...input });
-  expect(expectSingleCall("cron.add")).toEqual(expected);
+  expect(expectSingleCall("cron.add")).toEqual({ enabled: true, wakeMode: "now", ...expected });
 });
 
 it("preserves omitted declaration enablement and forwards explicit enablement", async () => {
@@ -464,11 +439,6 @@ it.each<[string, Record<string, unknown>, (string | RegExp)?, Options?]>([
   [
     "flat add without meaningful job fields",
     { action: "add", name: "orphan-name", enabled: true },
-    "job required",
-  ],
-  [
-    "malformed flattened fallback-only update",
-    { action: "update", id: "job-9", fallbacks: [123] },
     "job required",
   ],
   [

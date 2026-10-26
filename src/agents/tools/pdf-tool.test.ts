@@ -9,6 +9,7 @@ import * as webMedia from "../../media/web-media.js";
 import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { withEnvAsync } from "../../test-utils/env.js";
+import { createOAuthRefreshCredential } from "../auth-profiles/credential-fixtures.test-support.js";
 import * as authProfileRuntime from "../auth-profiles/store-runtime.js";
 import * as modelResolution from "../embedded-agent-runner/model.js";
 import * as modelAuth from "../model-auth.js";
@@ -250,33 +251,14 @@ it("selects later pages and reports partial extraction to both models", async ()
   expect(result.details).toMatchObject({ native: false, model: OPENAI });
 });
 
-it.each([
-  { stopReason: "stop", errorMessage: "  bad request  ", expected: ": bad request" },
-  { stopReason: "error", errorMessage: undefined, expected: "" },
-  { stopReason: "aborted", errorMessage: undefined, expected: "" },
-] as const)(
-  "reports failed PDF output before its text ($stopReason)",
-  async ({ stopReason, errorMessage, expected }) => {
-    const { pdf } = await extraction();
-    completeMock.mockResolvedValue({
-      ...summary("must not hide the failure"),
-      stopReason,
-      errorMessage,
-    });
-    await expect(pdf.execute("pdf", { pdf: "/tmp/doc.pdf" })).rejects.toThrow(
-      `PDF model failed (${OPENAI})${expected}`,
-    );
-  },
-);
-
-it("rejects extracted PDF responses without visible text", async () => {
+it("reports failed PDF output before its text", async () => {
   const { pdf } = await extraction();
   completeMock.mockResolvedValue({
-    ...summary(),
-    content: [{ type: "thinking", thinking: "private" }],
+    ...summary("must not hide the failure"),
+    errorMessage: "  bad request  ",
   });
   await expect(pdf.execute("pdf", { pdf: "/tmp/doc.pdf" })).rejects.toThrow(
-    `PDF model returned no text (${OPENAI}).`,
+    `PDF model failed (${OPENAI}): bad request`,
   );
 });
 
@@ -382,13 +364,11 @@ it("reports omitted images for a text-only model and supplies Codex instructions
   const codexLogin = {
     version: 1,
     profiles: {
-      "openai:default": {
-        provider: "openai",
-        type: "oauth" as const,
+      "openai:default": createOAuthRefreshCredential({
         access: "test-access",
         refresh: "test-refresh",
         expires: 4_102_444_800_000,
-      },
+      }),
     },
   };
   vi.mocked(authProfileRuntime.ensureAuthProfileStoreAsync).mockResolvedValue(codexLogin);

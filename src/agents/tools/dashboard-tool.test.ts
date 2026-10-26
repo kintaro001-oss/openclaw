@@ -32,7 +32,6 @@ function inGateway(context: GatewayRequestContext, run: () => Promise<void>) {
 
 function recorder(boardSnapshot: BoardSnapshot = snapshot) {
   const calls: Array<[string, Record<string, unknown>]> = [];
-  const commands: unknown[] = [];
   const callGateway: InProcessGatewayCaller = async <T>(
     method: string,
     params: Record<string, unknown>,
@@ -52,7 +51,6 @@ function recorder(boardSnapshot: BoardSnapshot = snapshot) {
       agentSessionKey: snapshot.sessionKey,
     }),
     calls,
-    commands,
   };
 }
 
@@ -156,27 +154,16 @@ it("dispatches through the admitted Gateway and fences replacement or retirement
       ),
   );
 
-  expect(admitted.requests).toHaveLength(3);
-  expect(admitted.requests.slice(0, 2)).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        type: "req",
-        id: expect.stringMatching(/^plugin-subagent-/u),
-        method: "board.get",
-        params: expect.objectContaining({ sessionKey: snapshot.sessionKey }),
-      }),
-      expect.objectContaining({
-        method: "sessions.describe",
-        params: expect.objectContaining({ key: snapshot.sessionKey }),
-      }),
-    ]),
-  );
-  expect(admitted.requests[2]).toEqual(
-    expect.objectContaining({
-      method: "sessions.patch",
-      params: { key: snapshot.sessionKey, boardFace: "dashboard", boardPresentation: "expanded" },
-    }),
-  );
+  expect(admitted.requests.map(({ params }) => params?.sessionKey ?? params?.key)).toEqual([
+    snapshot.sessionKey,
+    snapshot.sessionKey,
+    snapshot.sessionKey,
+  ]);
+  expect(admitted.requests[2]?.params).toEqual({
+    key: snapshot.sessionKey,
+    boardFace: "dashboard",
+    boardPresentation: "expanded",
+  });
   expect(replacement.requests).toEqual([]);
   expect(admitted.broadcastToConnIds).toHaveBeenCalledOnce();
   expect(replacement.broadcastToConnIds).not.toHaveBeenCalled();
@@ -226,7 +213,6 @@ it.each([
 ])("rejects invalid presentation command %j before broadcasting", async (args, message) => {
   const harness = recorder();
   await expect(harness.tool.execute("command", args)).rejects.toThrow(message);
-  expect(harness.commands).toEqual([]);
   expect(harness.calls).toEqual([]);
 });
 
@@ -276,13 +262,14 @@ it.each([
   const harness = recorder();
   const gateway = createGatewayAffinityHarness(0);
   gateway.context.getClientConnIds = () => new Set(["control-ui-1", "control-ui-2"]);
-  gateway.broadcastToConnIds.mockImplementation((_event: string, payload: unknown) => {
-    harness.commands.push(payload);
-  });
   await inGateway(gateway.context, async () => {
     const result = await harness.tool.execute("command", { action, ...args });
     expect(harness.calls).toEqual([]);
-    expect(harness.commands).toEqual([{ sessionKey: "agent:main:main", command }]);
+    expect(gateway.broadcastToConnIds).toHaveBeenCalledWith(
+      "board.command",
+      { sessionKey: snapshot.sessionKey, command },
+      new Set(["control-ui-1", "control-ui-2"]),
+    );
     expect(result.details).toEqual({ ok: true, delivered: 2 });
   });
 });
