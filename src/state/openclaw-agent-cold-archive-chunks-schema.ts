@@ -14,8 +14,8 @@ export function withoutAgentColdArchiveChunks(schema: string): string {
 /** Retain the exact predecessor catalog until the versioned PostgreSQL step runs. */
 export function withoutAgentPostgresColdArchiveChunks(schema: string): string {
   return schema
-    .replace(/CREATE TABLE "session_transcript_cold_archive_chunks" \([\s\S]*?\n\);\n/gu, "")
-    .replace(/ALTER TABLE "session_transcript_cold_archive_chunks" [^\n]+\n/gu, "");
+    .replace(/CREATE TABLE "session_transcript_cold_archive_chunks" \([\s\S]*?\n\);\n\n/gu, "")
+    .replace(/ALTER TABLE "session_transcript_cold_archive_chunks" [^\n]+\n\n/gu, "");
 }
 
 export function agentColdArchiveChunksPostgresMigration(schema: string): string {
