@@ -71,7 +71,7 @@ import {
   matchesDiscordToolContextTarget,
   normalizeDiscordMessagingTarget,
 } from "./normalize.js";
-import { discordOutbound } from "./outbound-adapter.js";
+import { discordOutbound } from "./outbound-payload.js";
 import { resolveDiscordOutboundSessionRoute } from "./outbound-session-route.js";
 import type { DiscordProbe } from "./probe.js";
 import { getDiscordRuntime } from "./runtime.js";
