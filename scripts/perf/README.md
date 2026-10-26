@@ -881,8 +881,11 @@ Add `--startup-admission --waves 20` to the cold-row command to attribute the
 operator request-start backlog. This uses a fixed 20 batches per client instead
 of `--seconds`. Each batch sends a scoped `models.list` before an event-only
 `sessions.subscribe`, immediately followed on the same socket by the
-sidebar, roster, Board, `sessions.describe`, `sessions.resolve`, `sessions.messages.subscribe`, and
-keyed `chat.startup` requests. Batches await all replies and retain the
+sidebar, roster, Board, `sessions.describe`, `sessions.resolve`, and
+`sessions.messages.subscribe` requests. The message subscription carries the UI's
+initial history request: 80 messages, 256 KiB, 2,000-character tool results, and an
+empty known-state map. Its response must include the session and history page;
+there is no duplicate `chat.startup` request. Batches await all replies and retain the
 `--poll-ms` pacing. There are no artificial handler delays or held preparations.
 Each client uses a distinct shared, unarchived fixture session for catalog,
 resolution, message subscription, and startup reads; Board uses the common seeded
@@ -913,6 +916,16 @@ Add `--from-listening` to start the reconnect cohort at the restarted Gateway's
 socket `listening` event, before `/readyz` succeeds. A private IPC notification
 uses the host's monotonic clock; the application listening log occurs later.
 CPU, GC, event-loop delay, and materialization counts start in that same event.
+The initial message subscription is sent after `connect` and before awaiting
+hello, matching the UI's opening subscription. Other first-wave reads follow
+hello. Failed startup attempts retain their connection timings but do not count
+as successful read waves. This mode identifies as the Control UI with signed,
+paired synthetic devices; the explicit catalog request still replaces capability
+negotiation.
+Event-loop delay uses a fixed `--seconds` horizon from listening, recorded in
+`loop.windowMs`, so a shorter startup does not change the percentile population.
+`waveLoop` also preserves the histogram available at wave completion. CPU, GC,
+and work counts end with the read waves; `cpuWindowMs` records that interval.
 The cohort uses the shared `live-fast` delivery floors and connect offset,
 recorded as `reloadLatency`; server diagnostic durations exclude these floors.
 This captures the upgrade and hello wait that a readiness-gated cohort misses. The result
@@ -924,6 +937,9 @@ waits; in this mode `readyMs`
 names the observed listening boundary rather than readiness. Use at least 30
 clients for a restart reload wave. This is a clean restart with settled runs;
 interrupted-run recovery still requires the separate restart workload.
+Keep the Gateway and adjacent sandbox port outside the host's ephemeral port
+range; `--port 61037` fits the standard AWS Linux range ending at 60999. Both
+benchmark ports must be at least 40000.
 
 For the larger restart cohort, generate `--sessions 10800 --runs 4300
 --settled-runs --team-stress` instead. The listening mode accepts this inventory

@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { buildDeviceAuthPayloadV3 } from "../../packages/gateway-client/src/device-auth.ts";
 import { GatewayClientRequestError } from "../../packages/gateway-client/src/request-error.ts";
+import { GATEWAY_CLIENT_IDS } from "../../packages/gateway-protocol/src/client-info.ts";
 import { resolveGatewayStartupRetryAfterMs } from "../../packages/gateway-protocol/src/startup-unavailable.ts";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.ts";
 import { isRecord } from "../../packages/normalization-core/src/record-coerce.ts";
@@ -702,6 +703,18 @@ if (isMainThread) {
   let coldFinishedAt = Infinity;
   let coldThreadCpu;
   let coldProcessCpu;
+  let coldFixedLoopFinished = false;
+  const coldLoopSnapshot = Promise.withResolvers();
+  const readColdLoop = () => ({
+    samples: coldLag.count, p95Ms: coldLag.percentile(95)/1e6,
+    p99Ms: coldLag.percentile(99)/1e6, maxMs: coldLag.max/1e6,
+    windowMs: performance.now() - coldStartedAt,
+  });
+  const finishColdLoop = () => {
+    coldLoopSnapshot.resolve(readColdLoop());
+    coldFixedLoopFinished = true;
+    if (coldFinishedAt !== Infinity) coldLag.disable();
+  };
   const collectColdGc = (entries) => {
     for (const entry of entries) {
       if (entry.startTime >= coldStartedAt && entry.startTime < coldFinishedAt) {
@@ -724,6 +737,9 @@ if (isMainThread) {
     coldProcessCpu = process.cpuUsage();
     rowCounts.active = true;
     coldLag.enable();
+    if (${values["from-listening"]}) {
+      setTimeout(finishColdLoop, ${durationMs}).unref();
+    }
   }
   process.on('message', async (message) => {
     if (message?.channel === 'cold-rows-ready') {
@@ -736,14 +752,19 @@ if (isMainThread) {
       const processCpu = process.cpuUsage(coldProcessCpu);
       markColdGc('diagnostics-stop');
       rowCounts.active = false;
-      coldLag.disable();
+      const waveLoop = readColdLoop();
+      if (!${values["from-listening"]}) {
+        finishColdLoop();
+      } else if (coldFixedLoopFinished) {
+        coldLag.disable();
+      }
       await new Promise(setImmediate);
       collectColdGc(coldGcObserver.takeRecords());
       coldGcObserver.disconnect();
       if (!rowOwnerLoaded || !rowSelectionHookLoaded || !rowTaskHookLoaded || rowCounts.selectPage === 0 || rowCounts.taskSamples === 0) {
         throw new Error('Cold row measurement did not load the selected owner, selection, and task hooks');
       }
-      if (${startupAdmission} && (!requestStartOwnerLoaded || !startupSpanHookLoaded || admissionOverflow || !admissionSamples.has('chat.startup:handler'))) {
+      if (${startupAdmission} && (!requestStartOwnerLoaded || !startupSpanHookLoaded || admissionOverflow || !admissionSamples.has('sessions.messages.subscribe:handler'))) {
         throw new Error('Startup admission diagnostics are incomplete');
       }
       const admission = ${startupAdmission} ? Object.fromEntries([...admissionSamples].map(([key, samples]) => {
@@ -751,9 +772,9 @@ if (isMainThread) {
         const percentile = (fraction) => samples[Math.max(0, Math.ceil(samples.length * fraction) - 1)] ?? null;
         return [key, { samples: samples.length, totalMs: samples.reduce((sum, ms) => sum + ms, 0), p50Ms: percentile(0.5), p90Ms: percentile(0.9), p95Ms: percentile(0.95), p99Ms: percentile(0.99), maxMs: samples.at(-1) ?? null }];
       })) : undefined;
-      process.send?.({ channel: 'cold-rows-loop', pid: process.pid,
-        samples: coldLag.count, p95Ms: coldLag.percentile(95)/1e6,
-        p99Ms: coldLag.percentile(99)/1e6, maxMs: coldLag.max/1e6,
+      const loop = await coldLoopSnapshot.promise;
+      process.send?.({ channel: 'cold-rows-loop', pid: process.pid, ...loop,
+        waveLoop, cpuWindowMs: coldFinishedAt - coldStartedAt,
         mainThreadCpuMs: (threadCpu.user + threadCpu.system)/1000,
         processCpuMs: (processCpu.user + processCpu.system)/1000,
         selectPageCalls: rowCounts.selectPage, materializedRows: rowCounts.materializedRows, rowOwnerSha256,
@@ -828,6 +849,9 @@ const coldRowsLoop = Promise.withResolvers<{
   p95Ms: number;
   p99Ms: number;
   maxMs: number;
+  windowMs: number;
+  cpuWindowMs: number;
+  waveLoop: Record<string, unknown>;
   mainThreadCpuMs: number;
   processCpuMs: number;
   selectPageCalls: number;
@@ -1083,6 +1107,9 @@ function launch(name: string) {
         typeof sample.p95Ms === "number" &&
         typeof sample.p99Ms === "number" &&
         typeof sample.maxMs === "number" &&
+        typeof sample.windowMs === "number" &&
+        typeof sample.cpuWindowMs === "number" &&
+        isRecord(sample.waveLoop) &&
         typeof sample.mainThreadCpuMs === "number" &&
         typeof sample.processCpuMs === "number" &&
         typeof sample.selectPageCalls === "number" &&
@@ -1096,6 +1123,9 @@ function launch(name: string) {
           p95Ms: sample.p95Ms,
           p99Ms: sample.p99Ms,
           maxMs: sample.maxMs,
+          windowMs: sample.windowMs,
+          cpuWindowMs: sample.cpuWindowMs,
+          waveLoop: sample.waveLoop,
           mainThreadCpuMs: sample.mainThreadCpuMs,
           processCpuMs: sample.processCpuMs,
           selectPageCalls: sample.selectPageCalls,
@@ -1318,7 +1348,14 @@ type ConnectAttempt = {
   extensions?: string;
   error?: string;
 };
-async function connect(index: number, options?: { proxy?: boolean; attempt?: ConnectAttempt }) {
+async function connect(
+  index: number,
+  options?: {
+    proxy?: boolean;
+    attempt?: ConnectAttempt;
+    onConnectSent?: (client: ReturnType<typeof createGatewayWsClient>) => void;
+  },
+) {
   const startedAt = performance.now();
   let connectStartedAt: number | undefined;
   const attempt = options?.attempt;
@@ -1374,7 +1411,7 @@ async function connect(index: number, options?: { proxy?: boolean; attempt?: Con
     }
     const scopes = ["operator.read", "operator.write", "operator.admin"];
     const identity = {
-      id: "gateway-client",
+      id: values["from-listening"] ? GATEWAY_CLIENT_IDS.CONTROL_UI : "gateway-client",
       displayName: "synthetic-post-restart-burst",
       version: "1.0.0",
       platform: process.platform,
@@ -1393,7 +1430,7 @@ async function connect(index: number, options?: { proxy?: boolean; attempt?: Con
       nonce,
     });
     connectStartedAt = performance.now();
-    const hello = await rpc(
+    const pendingHello = rpc(
       client,
       "connect",
       {
@@ -1414,6 +1451,8 @@ async function connect(index: number, options?: { proxy?: boolean; attempt?: Con
       },
       options?.proxy ? 30_000 : undefined,
     );
+    options?.onConnectSent?.(client);
+    const hello = await pendingHello;
     if (attempt) {
       attempt.connectMs = performance.now() - connectStartedAt;
     }
@@ -2129,12 +2168,15 @@ async function measureColdRowReads(
           {
             name: "sessions.messages.subscribe",
             method: "sessions.messages.subscribe",
-            params: { key: clientSessionKey },
-          },
-          {
-            name: "chat.startup",
-            method: "chat.startup",
-            params: { sessionKey: clientSessionKey, limit: 40, maxBytes: 262144 },
+            params: {
+              key: clientSessionKey,
+              initialHistory: {
+                limit: 80,
+                maxBytes: 256 * 1024,
+                toolResultMaxChars: 2_000,
+                knownState: {},
+              },
+            },
           },
         ]
       : []),
@@ -2155,8 +2197,86 @@ async function measureColdRowReads(
   const connections: ConnectAttempt[] = [];
   const observations = await Promise.allSettled(
     Array.from({ length: clientCount }, async (_, index) => {
+      const clientSessionKey = clientSessionKeys[index]!;
+      const read = async (
+        client: ReturnType<typeof createGatewayWsClient>,
+        { name, method, params }: (typeof readShapes)[number],
+        wave: number,
+      ) => {
+        const startedMs = performance.now() - restartAt;
+        let error: string | undefined;
+        try {
+          const response = await rpc(client, method, params);
+          if (method === "board.get") {
+            if (
+              !isRecord(response) ||
+              !Array.isArray(response.widgets) ||
+              response.widgets.length !== 3
+            ) {
+              throw new Error("Board did not return all three seeded widgets");
+            }
+          } else if (method === "models.list") {
+            if (!isRecord(response) || !Array.isArray(response.models)) {
+              throw new Error("Model catalog did not return its models array");
+            }
+          } else if (method === "sessions.describe") {
+            if (
+              !isRecord(response) ||
+              !isRecord(response.session) ||
+              response.session.key !== clientSessionKey
+            ) {
+              throw new Error("Session description did not return the seeded session");
+            }
+          } else if (method === "sessions.resolve") {
+            if (!isRecord(response) || response.ok !== true || response.key !== clientSessionKey) {
+              throw new Error("Session resolution did not return the seeded session");
+            }
+          } else if (method === "sessions.messages.subscribe") {
+            if (
+              !isRecord(response) ||
+              response.subscribed !== true ||
+              response.key !== clientSessionKey ||
+              !isRecord(response.initialHistory) ||
+              response.initialHistory.ok !== true ||
+              !isRecord(response.initialHistory.payload) ||
+              response.initialHistory.payload.sessionKey !== clientSessionKey ||
+              !Array.isArray(response.initialHistory.payload.messages) ||
+              !isRecord(response.initialHistory.payload.sessionInfo)
+            ) {
+              throw new Error("Message subscription did not return the seeded session and history");
+            }
+          } else if (method === "sessions.subscribe") {
+            if (!isRecord(response) || response.subscribed !== true) {
+              throw new Error("Session subscription did not enroll its observer");
+            }
+          } else if (
+            !isRecord(response) ||
+            !Array.isArray(response.sessions) ||
+            !response.sessions.some(
+              (row: unknown) =>
+                isRecord(row) &&
+                typeof row.sessionId === "string" &&
+                row.sessionId.startsWith("team-shape-session-"),
+            )
+          ) {
+            throw new Error("Session list did not return the seeded roster");
+          }
+        } catch (cause) {
+          error = String(cause);
+        }
+        return {
+          method: name,
+          client: index,
+          wave,
+          startedMs,
+          elapsedMs: performance.now() - restartAt - startedMs,
+          ...(error ? { error } : {}),
+        };
+      };
       let client: Awaited<ReturnType<typeof connect>>;
+      let openingSubscription: Promise<(typeof timings)[number]> | undefined;
       for (;;) {
+        openingSubscription = undefined;
         const attempt: ConnectAttempt = {
           client: index,
           wave: 0,
@@ -2166,7 +2286,19 @@ async function measureColdRowReads(
         };
         connections.push(attempt);
         try {
-          client = await connect(index, { attempt });
+          client = await connect(index, {
+            attempt,
+            ...(values["from-listening"]
+              ? {
+                  onConnectSent: (connectingClient) => {
+                    const shape = clientReadShapes[index]!.find(
+                      (shape) => shape.method === "sessions.messages.subscribe",
+                    )!;
+                    openingSubscription = read(connectingClient, shape, 0);
+                  },
+                }
+              : {}),
+          });
           break;
         } catch (error) {
           const retryMs = resolveGatewayStartupRetryAfterMs(error);
@@ -2176,95 +2308,20 @@ async function measureColdRowReads(
           await delay(retryMs);
         }
       }
-      const clientSessionKey = clientSessionKeys[index]!;
       connectedClients.add(index);
       for (
         let wave = 0;
         startupAdmission ? wave < waveCount : performance.now() < deadline;
         wave++
       ) {
-        await Promise.all(
-          clientReadShapes[index]!.map(async ({ name, method, params }) => {
-            const startedMs = performance.now() - restartAt;
-            let error: string | undefined;
-            try {
-              const response = await rpc(client, method, params);
-              if (method === "board.get") {
-                if (
-                  !isRecord(response) ||
-                  !Array.isArray(response.widgets) ||
-                  response.widgets.length !== 3
-                ) {
-                  throw new Error("Board did not return all three seeded widgets");
-                }
-              } else if (method === "models.list") {
-                if (!isRecord(response) || !Array.isArray(response.models)) {
-                  throw new Error("Model catalog did not return its models array");
-                }
-              } else if (method === "sessions.describe") {
-                if (
-                  !isRecord(response) ||
-                  !isRecord(response.session) ||
-                  response.session.key !== clientSessionKey
-                ) {
-                  throw new Error("Session description did not return the seeded session");
-                }
-              } else if (method === "sessions.resolve") {
-                if (
-                  !isRecord(response) ||
-                  response.ok !== true ||
-                  response.key !== clientSessionKey
-                ) {
-                  throw new Error("Session resolution did not return the seeded session");
-                }
-              } else if (method === "sessions.messages.subscribe") {
-                if (
-                  !isRecord(response) ||
-                  response.subscribed !== true ||
-                  response.key !== clientSessionKey
-                ) {
-                  throw new Error("Message subscription did not admit the seeded session");
-                }
-              } else if (method === "chat.startup") {
-                if (
-                  !isRecord(response) ||
-                  response.sessionKey !== clientSessionKey ||
-                  !Array.isArray(response.messages) ||
-                  !isRecord(response.sessionInfo)
-                ) {
-                  throw new Error(
-                    "Chat startup did not return the seeded session and history page",
-                  );
-                }
-              } else if (method === "sessions.subscribe") {
-                if (!isRecord(response) || response.subscribed !== true) {
-                  throw new Error("Session subscription did not enroll its observer");
-                }
-              } else if (
-                !isRecord(response) ||
-                !Array.isArray(response.sessions) ||
-                !response.sessions.some(
-                  (row: unknown) =>
-                    isRecord(row) &&
-                    typeof row.sessionId === "string" &&
-                    row.sessionId.startsWith("team-shape-session-"),
-                )
-              ) {
-                throw new Error("Session list did not return the seeded roster");
-              }
-            } catch (cause) {
-              error = String(cause);
-            }
-            timings.push({
-              method: name,
-              client: index,
-              wave,
-              startedMs,
-              elapsedMs: performance.now() - restartAt - startedMs,
-              ...(error ? { error } : {}),
-            });
-          }),
+        const waveTimings = await Promise.all(
+          clientReadShapes[index]!.map((shape) =>
+            wave === 0 && shape.method === "sessions.messages.subscribe" && openingSubscription
+              ? openingSubscription
+              : read(client, shape, wave),
+          ),
         );
+        timings.push(...waveTimings);
         await delay(
           startupAdmission ? pollMs : Math.max(0, Math.min(pollMs, deadline - performance.now())),
         );
@@ -2280,6 +2337,8 @@ async function measureColdRowReads(
   const {
     mainThreadCpuMs,
     processCpuMs,
+    cpuWindowMs,
+    waveLoop,
     selectPageCalls,
     materializedRows,
     rowOwnerSha256,
@@ -2290,7 +2349,9 @@ async function measureColdRowReads(
     ...loop
   } = await Promise.race([
     coldRowsLoop.promise,
-    delay(10_000, undefined, { ref: false }).then(() => {
+    delay(values["from-listening"] ? durationMs + 10_000 : 10_000, undefined, {
+      ref: false,
+    }).then(() => {
       throw new Error("Cold row probe did not finish");
     }),
   ]);
@@ -2333,6 +2394,8 @@ async function measureColdRowReads(
     startedAtEpochMs,
     afterReadyDurationMs,
     loop,
+    waveLoop,
+    cpuWindowMs,
     synchronousTasks,
     mainThreadCpuMs,
     processCpuMs,
