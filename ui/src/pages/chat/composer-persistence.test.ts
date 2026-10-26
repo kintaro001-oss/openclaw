@@ -13,7 +13,6 @@ import {
   listStoredChatOutboxes as listOutboxes,
 } from "../../lib/chat/outbox-store-projection.ts";
 import {
-  captureChatOutboxAdmission,
   storageTargetForComposer,
   storageTargetForGateway,
   subscribeStoredChatOutboxChanges,
@@ -37,10 +36,7 @@ import {
   reloadStorage,
 } from "./composer-persistence.test-support.ts";
 import { ChatComposerPersistence } from "./composer-persistence.ts";
-import {
-  admitStoredChatComposerQueueItemResult,
-  updateStoredChatComposerQueueItems as updateItems,
-} from "./composer-queue-persistence.ts";
+import { updateStoredChatComposerQueueItems as updateItems } from "./composer-queue-persistence.ts";
 
 type ComposerState = ReturnType<typeof createState>;
 
@@ -59,6 +55,8 @@ const replaceItem = (
   next: ChatQueueItem,
   agentId?: string,
 ) => updateItems(state, state.sessionKey, [{ expected, next }], agentId);
+const removeItem = (state: ComposerState, expected: ChatQueueItem, agentId?: string) =>
+  updateItems(state, state.sessionKey, [{ expected, next: null }], agentId);
 function seedSessions(
   sessions: Record<string, unknown>,
   version = 1,
@@ -101,7 +99,7 @@ const expectDraft = (state: ComposerState, draft: string, queue: ChatQueueItem[]
 function roundtripQueue(state: ComposerState, id: string) {
   const queued = reconnectItem(id, 1);
   expect(admitItem(state, queued)).toBe(true);
-  expect(updateItems(state, state.sessionKey, [{ expected: queued, next: null }])).toBe(true);
+  expect(removeItem(state, queued)).toBe(true);
 }
 
 function outbox(items: ChatQueueItem | ChatQueueItem[], sessionKey: string, agentId?: string) {
@@ -355,9 +353,9 @@ it("rejects stale updates and deletes after an attachment payload replacement", 
   expect(admitItem(state, original)).toBe(true);
   expect(replaceItem(state, original, successor)).toBe(true);
   expect(replaceItem(state, original, { ...original, sendAttempts: 2 })).toBe(false);
-  expect(updateItems(state, state.sessionKey, [{ expected: original, next: null }])).toBe(false);
+  expect(removeItem(state, original)).toBe(false);
   expect(snapshot(state)?.queue[0]).toMatchObject(successor);
-  expect(updateItems(state, state.sessionKey, [{ expected: successor, next: null }])).toBe(true);
+  expect(removeItem(state, successor)).toBe(true);
   expectDraft(state, "keep this draft");
 });
 
@@ -422,7 +420,7 @@ it("reviews shipped selected-agent opaque rows without passively adopting either
 
   const attempted = { ...restored, sendAttempts: 1 };
   expect(replaceItem(state, restored, attempted)).toBe(true);
-  expect(updateItems(state, sessionKey, [{ expected: attempted, next: null }])).toBe(true);
+  expect(removeItem(state, attempted)).toBe(true);
   expectDraft(state, "older draft");
   expect(readRecovery(state).entries.map((entry) => entry.session)).toMatchObject([
     { draft: "newer draft", queue: [second] },
@@ -762,13 +760,7 @@ it("keeps failed attachment sends durable and retryable, including stack-overflo
     ],
   };
 
-  expect(
-    admitStoredChatComposerQueueItemResult(
-      state,
-      captureChatOutboxAdmission(state, state.sessionKey),
-      failed,
-    ),
-  ).toBe("admitted");
+  expect(admitItem(state, failed)).toBe(true);
   expect(load(state, state.sessionKey).snapshot?.queue).toMatchObject([
     {
       id: "overflow-attachment",
@@ -929,28 +921,19 @@ describe("chat composer draft presence notifications", () => {
       expect(listener).toHaveBeenCalledTimes(4);
       expect(admitItem(state, original)).toBe(true);
       expect(listener).toHaveBeenCalledTimes(5);
-      expect(
-        updateItems(
-          state,
-          state.sessionKey,
-          [{ expected: original, next: updated }],
-          original.agentId,
-        ),
-      ).toBe(true);
+      expect(replaceItem(state, original, updated, original.agentId)).toBe(true);
       expect(listener).toHaveBeenCalledTimes(6);
     } finally {
       unsubscribe();
     }
 
-    expect(
-      updateItems(state, state.sessionKey, [{ expected: updated, next: null }], updated.agentId),
-    ).toBe(true);
+    expect(removeItem(state, updated, updated.agentId)).toBe(true);
     expect(listener).toHaveBeenCalledTimes(6);
     const write = vi.spyOn(sessionStorage, "setItem");
     const remove = vi.spyOn(sessionStorage, "removeItem");
     const stop = subscribeStoredChatOutboxChanges(listener);
     try {
-      expect(updateItems(state, state.sessionKey, [{ expected: updated, next: null }])).toBe(true);
+      expect(removeItem(state, updated)).toBe(true);
       expect(write).not.toHaveBeenCalled();
       expect(remove).not.toHaveBeenCalled();
       expect(listener).toHaveBeenCalledTimes(6);

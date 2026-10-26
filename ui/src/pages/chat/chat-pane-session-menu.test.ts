@@ -46,6 +46,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function headerProps(pane: TestChatPane, row?: GatewaySessionRow, catalog = false) {
+  return pane.renderPaneHeader(
+    createPaneHeaderWorkspaceFixture(pane.state),
+    row,
+    catalog,
+    undefined,
+    false,
+    null,
+  );
+}
+
+function drawHeader(
+  pane: TestChatPane,
+  container: HTMLElement,
+  row?: GatewaySessionRow,
+  catalog = false,
+) {
+  renderPaneHeaderInto(headerProps(pane, row, catalog), container);
+  return container.querySelector(".chat-pane__session-title-text")?.textContent?.trim();
+}
+
 describe("chat pane session menu boundary", () => {
   it("leaves session actions unbuilt after idle until the menu opens", async () => {
     vi.useFakeTimers({
@@ -66,19 +87,7 @@ describe("chat pane session menu boundary", () => {
       pane.presented = true;
       state.chatLoading = false;
       state.sessionsResult = sessionsResult([row], 1);
-      const mounted = mountSolid(() =>
-        createComponent(
-          PaneHeaderView,
-          pane.renderPaneHeader(
-            createPaneHeaderWorkspaceFixture(state),
-            row,
-            false,
-            undefined,
-            false,
-            null,
-          ),
-        ),
-      );
+      const mounted = mountSolid(() => createComponent(PaneHeaderView, headerProps(pane, row)));
       flush();
       await vi.advanceTimersByTimeAsync(4_000);
       flush();
@@ -118,16 +127,7 @@ describe("chat pane session menu boundary", () => {
       projectChatFields(pane.headerPresentation);
       return createComponent(
         PaneHeaderView,
-        merge(() =>
-          pane.renderPaneHeader(
-            createPaneHeaderWorkspaceFixture(state),
-            row,
-            false,
-            undefined,
-            false,
-            null,
-          ),
-        ),
+        merge(() => headerProps(pane, row)),
       );
     });
     flush();
@@ -245,14 +245,7 @@ describe("chat pane session menu boundary", () => {
       sharingRole: "owner",
     };
     const container = document.body.appendChild(document.createElement("div"));
-    let workspace = createPaneHeaderWorkspaceFixture(state);
-    const draw = () => {
-      workspace = createPaneHeaderWorkspaceFixture(state);
-      renderPaneHeaderInto(
-        pane.renderPaneHeader(workspace, session, false, undefined, false, null),
-        container,
-      );
-    };
+    const draw = () => drawHeader(pane, container, session);
     draw();
     const menu = container.querySelector("openclaw-chat-header-session-menu")!;
     await menu.updateComplete;
@@ -362,20 +355,8 @@ describe("chat pane session menu boundary", () => {
     const verifier = mount(retained.key, "research");
     await Promise.all([ledger, verifier].map(refreshPane));
     const container = document.body.appendChild(document.createElement("div"));
-    const title = (pane: TestChatPane) => {
-      renderPaneHeaderInto(
-        pane.renderPaneHeader(
-          createPaneHeaderWorkspaceFixture(pane.state),
-          selectedChatSessionRow(pane.state),
-          false,
-          undefined,
-          false,
-          null,
-        ),
-        container,
-      );
-      return container.querySelector(".chat-pane__session-title-text")?.textContent?.trim();
-    };
+    const title = (pane: TestChatPane) =>
+      drawHeader(pane, container, selectedChatSessionRow(pane.state));
     expect(sessions.state.result?.sessions.map((row) => row.key)).toEqual([primary.key]);
     expect.soft(title(verifier)).toBe("Fresh pane isolation check");
 
@@ -430,20 +411,7 @@ describe("chat pane session menu boundary", () => {
       agentId: "main",
     });
     const container = document.createElement("div");
-    renderPaneHeaderInto(
-      pane.renderPaneHeader(
-        createPaneHeaderWorkspaceFixture(pane.state),
-        undefined,
-        false,
-        undefined,
-        false,
-        null,
-      ),
-      container,
-    );
-    expect(container.querySelector(".chat-pane__session-title-text")?.textContent?.trim()).toBe(
-      row.label,
-    );
+    expect(drawHeader(pane, container)).toBe(row.label);
   });
 
   it("resolves cached titles for Home aliases using the current hello defaults", () => {
@@ -468,20 +436,7 @@ describe("chat pane session menu boundary", () => {
       },
     };
     const container = document.createElement("div");
-    renderPaneHeaderInto(
-      pane.renderPaneHeader(
-        createPaneHeaderWorkspaceFixture(state),
-        undefined,
-        false,
-        undefined,
-        false,
-        null,
-      ),
-      container,
-    );
-    expect(container.querySelector(".chat-pane__session-title-text")?.textContent?.trim()).toBe(
-      "Dev desk",
-    );
+    expect(drawHeader(pane, container)).toBe("Dev desk");
   });
 
   it("keeps reconnect presentation and catalog names ahead of incomplete pane metadata", () => {
@@ -491,7 +446,7 @@ describe("chat pane session menu boundary", () => {
         1,
       ),
     };
-    const { pane, state } = createTestChatPane({
+    const { pane } = createTestChatPane({
       client: createGatewayBrowserClientFixture({
         request: (method) =>
           method === "agents.list"
@@ -510,20 +465,8 @@ describe("chat pane session menu boundary", () => {
       kind: "direct",
       derivedTitle: "Partial reconnect metadata",
     } satisfies GatewaySessionRow;
-    const draw = (session: GatewaySessionRow | undefined, catalog = false) => {
-      renderPaneHeaderInto(
-        pane.renderPaneHeader(
-          createPaneHeaderWorkspaceFixture(state),
-          session,
-          catalog,
-          undefined,
-          false,
-          null,
-        ),
-        container,
-      );
-      return container.querySelector(".chat-pane__session-title-text")?.textContent?.trim();
-    };
+    const draw = (session: GatewaySessionRow | undefined, catalog = false) =>
+      drawHeader(pane, container, session, catalog);
     expect(draw(undefined)).toBe("Retained conversation");
     expect(container.querySelector(".chat-pane__session-title")?.getAttribute("title")).toBe(
       "Connect to the Gateway to change sessions.",
@@ -582,17 +525,7 @@ describe("chat pane session menu boundary", () => {
       updatedAt: 0,
     } satisfies GatewaySessionRow;
     const container = document.body.appendChild(document.createElement("div"));
-    renderPaneHeaderInto(
-      pane.renderPaneHeader(
-        createPaneHeaderWorkspaceFixture(state),
-        session,
-        false,
-        undefined,
-        false,
-        null,
-      ),
-      container,
-    );
+    drawHeader(pane, container, session);
     const menu = container.querySelector("openclaw-chat-header-session-menu");
     expect(menu).not.toBeNull();
     await menu?.updateComplete;
@@ -623,17 +556,7 @@ describe("chat pane session menu boundary", () => {
       state.settings = loadSettings();
       const row: GatewaySessionRow = { key, sessionId: "fixture", kind: "direct", updatedAt: 0 };
       const container = document.body.appendChild(document.createElement("div"));
-      renderPaneHeaderInto(
-        pane.renderPaneHeader(
-          createPaneHeaderWorkspaceFixture(state),
-          row,
-          false,
-          undefined,
-          false,
-          null,
-        ),
-        container,
-      );
+      drawHeader(pane, container, row);
       const menu = container.querySelector("openclaw-chat-header-session-menu");
       await menu?.updateComplete;
       expect(menu?.openMenu()).toBe(true);

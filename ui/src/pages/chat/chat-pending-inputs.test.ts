@@ -19,7 +19,7 @@ import {
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { getChatHistoryLoadState } from "./chat-history-state.ts";
 import { loadChatHistory } from "./chat-history.ts";
-import { makeChatHost } from "./chat-host.test-support.ts";
+import { expectRequestCounts, makeChatHost, requestCalls } from "./chat-host.test-support.ts";
 import { admitQueuedMessageForSession } from "./chat-outbox-admission.test-support.ts";
 import { createTestPageState } from "./chat-page-state.test-support.ts";
 import {
@@ -289,7 +289,7 @@ describe("server-owned pending input display", () => {
       await retainDeliveredUserTurn(host, queuedSource(runId));
     }
     const loading = [loadChatHistory(first), loadChatHistory(second)];
-    const calls = first.request.mock.calls.filter(([method]) => method === "chat.history");
+    const calls = requestCalls(first.request, "chat.history");
     response.resolve({ sessionId, messages: [], pendingInputs: { items: [], total: 0 } });
     await Promise.all(loading);
     expect(calls).toHaveLength(2);
@@ -675,9 +675,7 @@ describe("server-owned pending input display", () => {
       await vi.waitFor(() => expect(getChatPendingInputs(host)?.page).toEqual(page));
       expect(host.chatRunId).toBe("active-run");
       expect(host.chatStream).toBe("Live output");
-      expect(host.request.mock.calls.filter(([method]) => method === "chat.history")).toHaveLength(
-        1,
-      );
+      expect(requestCalls(host.request, "chat.history")).toHaveLength(1);
     },
   );
 
@@ -892,7 +890,7 @@ describe("server-owned pending input display", () => {
           text: "Interrupted before the agent started it. If it does not resume, copy it and send again.",
         }),
       );
-      expect(host.request.mock.calls.some(([method]) => method === "chat.send")).toBe(false);
+      expectRequestCounts(host.request, { "chat.send": 0 });
       applyChatPendingInputs(
         host,
         { items: [], total: 0 },
