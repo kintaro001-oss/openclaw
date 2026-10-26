@@ -114,6 +114,7 @@ vi.mock("../../../infra/agent-events.js", () => ({
   onAgentEvent: mocks.onAgentEvent,
   registerAgentEventLifecycleRotationHandler: vi.fn(),
 }));
+// mock-isolation: Registry fixtures control run ownership without the process-global registry.
 vi.mock("../../../infra/agent-run-registry.js", () => ({
   getAgentRunContext: mocks.getAgentRunContext,
   listAgentRunsForSession: () => [],

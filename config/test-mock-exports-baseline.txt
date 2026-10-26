@@ -2127,7 +2127,6 @@
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../context-engine/registry.js","c547e604f0102ac745faab10255bdb4853ee25c6231b074b5f50ce3cf2a5017c",1]
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../gateway/call.js","64011d40301330b379e7aea54e4e35d6dfa3da206700467657e3fa35f1e31c87",1]
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../infra/agent-events.js","fd40357ab7b873b25cb35fea14b08a4cbb009c19ab2c6c53109026f6c4334ba3",1]
-["src/agents/subagents/registry/subagent-registry.test.ts","../../../infra/agent-run-registry.js","ceeae260d0207848291aecb907b62193b01b28d4e1b0f76d4d45c4d73efc40ef",1]
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../plugin-sdk/facade-runtime.js","20b105b232530042bb6e64207f63a5e91be08eb637ed07a69cb561952e8bba7a",1]
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../plugins/hook-runner-global.js","bf92046c3f554938364a96722ed7b97a32598c17b25309cad2664b669da9b85b",1]
 ["src/agents/subagents/registry/subagent-registry.test.ts","../../../sessions/session-lifecycle-events.js","70cfdc9743b35a7e7bf4ca3835eeba1147057a9cf0a7250a6505840aee4d96a8",1]
