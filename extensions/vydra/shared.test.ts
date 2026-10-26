@@ -13,15 +13,18 @@ describe("downloadVydraAsset", () => {
   installPinnedHostnameTestHooks();
 
   let server: http.Server | undefined;
-  let dripTimer: ReturnType<typeof setTimeout> | undefined;
+  let dripTimer: ReturnType<typeof setInterval> | undefined;
 
   const requestPolicyFor = (url: string, allowPrivateNetwork = false) => ({
     allowPrivateNetwork,
     headers: new Headers(),
     headerOrigin: new URL(url).origin,
   });
-  const download = (fetchFn: typeof fetch, overrides: Partial<DownloadOptions> = {}) => {
-    vi.stubGlobal("fetch", vi.fn(fetchFn));
+  const download = (
+    response: Response | typeof fetch,
+    overrides: Partial<DownloadOptions> = {},
+  ) => {
+    vi.stubGlobal("fetch", vi.fn(typeof response === "function" ? response : async () => response));
     return downloadVydraAsset({
       url: `https://cdn.vydra.example/generated/test.${overrides.kind === "video" ? "mp4" : "png"}`,
       kind: "image",
@@ -31,51 +34,37 @@ describe("downloadVydraAsset", () => {
       ...overrides,
     });
   };
-  function respond(body: BodyInit, init?: ResponseInit): typeof fetch {
-    return async () => new Response(body, init);
-  }
-
   afterEach(async () => {
-    clearTimeout(dripTimer);
+    clearInterval(dripTimer);
     dripTimer = undefined;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
-    if (!server) {
-      return;
+    if (server) {
+      server.closeAllConnections?.();
+      server.close();
+      await once(server, "close").catch(() => undefined);
+      server = undefined;
     }
-    server.closeAllConnections?.();
-    server.close();
-    await once(server, "close").catch(() => undefined);
-    server = undefined;
   });
 
-  async function listenDripServer(statusCode: number): Promise<number> {
-    const chunk = statusCode === 200 ? Buffer.from([0x00]) : "e";
+  it.each([200, 500])("times out dripping HTTP %i with a frozen clock", async (statusCode) => {
+    vi.useFakeTimers({
+      toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
     server = http.createServer((_req, res) => {
       res.on("error", () => {});
       res.writeHead(statusCode, {
         "Content-Type": statusCode === 200 ? "image/png" : "text/plain",
       });
-      // One pending drip per response keeps the chunk-idle timeout from firing.
-      const drip = () => {
-        if (res.writableEnded || res.destroyed) {
-          return;
-        }
-        res.write(chunk);
-        dripTimer = setTimeout(drip, 20);
-      };
-      drip();
+      const drip = () => res.write(statusCode === 200 ? Buffer.from([0x00]) : "e");
+      drip(); // Keep the chunk-idle timeout from firing.
+      dripTimer = setInterval(drip, 20);
+      res.on("close", () => clearInterval(dripTimer));
     });
     server.on("clientError", (_err, socket) => socket.destroy());
     const port = await listenOnLoopback(server);
-    return port;
-  }
-
-  it.each([200, 500])("times out dripping HTTP %i with a frozen clock", async (statusCode) => {
-    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
-    const timeoutMs = 250;
-    const port = await listenDripServer(statusCode);
+    const url = `http://127.0.0.1:${port}`;
     vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const headersReceived = createDeferred<void>();
     const settled = vi.fn();
@@ -86,30 +75,24 @@ describe("downloadVydraAsset", () => {
         return response;
       },
       {
-        url: `http://127.0.0.1:${port}/generated/test.png`,
-        timeoutMs,
-        requestPolicy: requestPolicyFor(`http://127.0.0.1:${port}`, true),
+        url: `${url}/generated/test.png`,
+        requestPolicy: requestPolicyFor(url, true),
       },
     );
     void result.then(settled, settled);
     // Connection setup must finish before advancing the body deadline.
-    await Promise.race([
-      headersReceived.promise,
-      result.then(() => {
-        throw new Error("Dripping download completed before headers were received");
-      }),
-    ]);
+    await Promise.race([headersReceived.promise, result]);
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+    await vi.advanceTimersByTimeAsync(249);
     expect(settled).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    await expect(result).rejects.toThrow(`Vydra image download timed out after ${timeoutMs}ms`);
+    await expect(result).rejects.toThrow("Vydra image download timed out after 250ms");
   });
 
   it.each([502, 200])("preserves body failures and clears timers (HTTP %i)", async (status) => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const result = await download(
-      respond(
+      new Response(
         new ReadableStream({
           start: (controller) => controller.error(new Error("broken body")),
         }),
@@ -138,7 +121,7 @@ describe("downloadVydraAsset", () => {
     { name: "empty video", contentType: "video/mp4", body: "" },
   ])("rejects a successful $name response as a downloaded video", async ({ contentType, body }) => {
     await expect(
-      download(respond(body, { status: 200, headers: { "content-type": contentType } }), {
+      download(new Response(body, { headers: { "content-type": contentType } }), {
         kind: "video",
       }),
     ).rejects.toThrow("Vydra video download: malformed video response");
@@ -146,7 +129,7 @@ describe("downloadVydraAsset", () => {
 
   it("keeps valid downloads alive beyond the binary reader's default idle timeout", async () => {
     vi.useFakeTimers();
-    const fetchFn = respond(
+    const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(new Uint8Array([1, 2, 3]));
@@ -155,10 +138,9 @@ describe("downloadVydraAsset", () => {
       }),
       { headers: { "content-type": "video/mp4" } },
     );
-    const result = download(fetchFn, {
+    const result = download(response, {
       kind: "video",
       timeoutMs: 45_000,
-      maxBytes: 1024,
     }).catch((error: unknown) => error);
 
     await vi.advanceTimersByTimeAsync(31_000);
@@ -167,33 +149,28 @@ describe("downloadVydraAsset", () => {
 });
 
 it("preserves URL priority, traversal bounds and independent result arrays", () => {
-  const url = (file: string) => `https://cdn.example/${file}`;
+  const url = (name: string) => `https://cdn.example/${name}.png`;
   let data: Record<string, unknown> = {
-    imageUrl: url("edge.png"),
-    data: { imageUrl: url("too-deep.png") },
+    imageUrl: url("edge"),
+    data: { imageUrl: url("too-deep") },
   };
   for (let depth = 1; depth < 5; depth++) {
     data = { data };
   }
   const payload = {
-    audioUrl: url("other.mp3"),
-    videoUrl: url("other.mp4"),
-    imageUrls: [url("second.png"), [` ${url("first.png")} `]],
-    imageUrl: ` \t${url("first.png")}\n`,
-    url: url("shared.png"),
-    resultUrl: url("result.png"),
-    outputs: [
-      { imageUrl: url("second.png"), url: url("nested.png") },
-      [[{ imageUrl: url("array.png") }]],
-    ],
+    audioUrl: "https://cdn.example/other.mp3",
+    videoUrl: "https://cdn.example/other.mp4",
+    imageUrls: [url("second"), [` ${url("first")} `]],
+    imageUrl: ` \t${url("first")}\n`,
+    url: url("shared"),
+    resultUrl: url("result"),
+    outputs: [{ imageUrl: url("second"), url: url("nested") }, [[{ imageUrl: url("array") }]]],
     data,
   };
-  const expected = ["first", "second", "result", "shared", "nested", "array", "edge"].map((name) =>
-    url(`${name}.png`),
-  );
+  const expected = ["first", "second", "result", "shared", "nested", "array", "edge"].map(url);
 
   const urls = extractVydraResultUrls(payload, "image");
   expect(urls).toEqual(expected);
-  urls.push(url("caller-owned.png"));
+  urls.push(url("caller-owned"));
   expect(extractVydraResultUrls(payload, "image")).toEqual(expected);
 });
