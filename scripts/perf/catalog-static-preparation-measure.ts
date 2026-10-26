@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Session } from "node:inspector/promises";
+import { Session, type HeapProfiler } from "node:inspector/promises";
 import { registerHooks, stripTypeScriptTypes } from "node:module";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -61,7 +61,7 @@ const providers: ProviderPlugin[] = Array.from({ length: 40 }, (_provider, provi
     label: id,
     auth: [],
     staticCatalog: {
-      run() {
+      async run() {
         calls++;
         return { provider: config };
       },
@@ -103,6 +103,9 @@ assert(prepared);
 assert.equal(prepared.entries.length, 40);
 assert.equal(prepared.entries[0]?.provider.id, "synthetic-0");
 assert.equal(prepared.entries[0]?.providerConfigs["synthetic-0"]?.models.length, 250);
+function sampledBytes(node: HeapProfiler.SamplingHeapProfileNode): number {
+  return node.selfSize + node.children.reduce((total, child) => total + sampledBytes(child), 0);
+}
 console.log(
   JSON.stringify({
     mode: values.mode,
@@ -112,7 +115,7 @@ console.log(
     calls,
     elapsedMs,
     cpuMs: (cpuUsed.user + cpuUsed.system) / 1000,
-    sampledBytes: allocation?.samples.reduce((total, sample) => total + sample.size, 0),
+    sampledBytes: allocation ? sampledBytes(allocation.head) : undefined,
     gcMs: gc?.statistics.reduce((total, sample) => total + sample.cost / 1000, 0),
   }),
 );
