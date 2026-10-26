@@ -165,7 +165,7 @@ it("reuses resident transcript bytes for admitted reads outside the actor withou
                 const anchor = prepared.transcript?.anchors[0];
                 assert(anchor);
                 expect(anchor.entryId).toBe(entryId);
-                anchor.entryId = "caller-owned-edit";
+                expect(Reflect.set(anchor, "entryId", "caller-owned-edit")).toBe(true);
               },
             );
           }
