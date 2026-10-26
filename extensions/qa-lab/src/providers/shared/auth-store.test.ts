@@ -32,15 +32,14 @@ async function writeUnreadableDatabase(databasePath: string, kind: "future" | "i
 
 async function createQaAuthState() {
   const stateDir = await tempDirs.makeTempDir("openclaw-qa-auth-store-");
-  const agentId = "main";
   vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
   return {
     stateDir,
-    agentDir: path.join(stateDir, "agents", agentId, "agent"),
+    agentDir: path.join(stateDir, "agents", "main", "agent"),
     write: (
       profiles: Parameters<typeof writeQaAuthProfiles>[0]["profiles"] = mockProfiles,
       replace = false,
-    ) => writeQaAuthProfiles({ agentId, stateDir, profiles, replace }),
+    ) => writeQaAuthProfiles({ agentId: "main", stateDir, profiles, replace }),
   };
 }
 
@@ -54,10 +53,9 @@ afterEach(async () => {
 it("keeps inherited host shared state unchanged while staging isolated profiles", async () => {
   const hostStateDir = await tempDirs.makeTempDir("openclaw-qa-auth-host-state-");
   const { stateDir, agentDir, write } = await createQaAuthState();
-  const hostDatabase = openOpenClawStateDatabase({
+  const hostDatabasePath = openOpenClawStateDatabase({
     env: { ...process.env, OPENCLAW_STATE_DIR: hostStateDir },
-  });
-  const hostDatabasePath = hostDatabase.path;
+  }).path;
   await closeOpenClawStateDatabaseAsync();
   const legacyHostDatabase = new DatabaseSync(hostDatabasePath);
   legacyHostDatabase.exec(`
@@ -88,36 +86,27 @@ it.each(["future", "invalid"] as const)("isolates concurrent staging from %s", a
   const hostDatabasePath = path.join(hostStateDir, "state", "openclaw.sqlite");
   await writeUnreadableDatabase(hostDatabasePath, kind);
   const hostBefore = await fs.readFile(hostDatabasePath);
-  const qaRoots = await Promise.all([
-    tempDirs.makeTempDir("openclaw-qa-auth-first-"),
-    tempDirs.makeTempDir("openclaw-qa-auth-second-"),
-  ]);
   vi.stubEnv("OPENCLAW_STATE_DIR", hostStateDir);
   vi.stubEnv("OPENCLAW_AGENT_DIR", path.join(hostStateDir, "relocated-agent"));
-
-  const configs = await Promise.all(
-    qaRoots.map((stateDir, index) =>
-      stageQaMockAuthProfiles({
+  const staged = await Promise.all(
+    ["openai", "anthropic"].map(async (provider) => {
+      const stateDir = await tempDirs.makeTempDir("openclaw-qa-auth-concurrent-");
+      const config = await stageQaMockAuthProfiles({
         cfg: {},
         agentIds: ["qa"],
         stateDir,
-        providers: [index === 0 ? "openai" : "anthropic"],
-      }),
-    ),
+        providers: [provider],
+      });
+      return { stateDir, provider, config };
+    }),
   );
-
-  for (const [index, stateDir] of qaRoots.entries()) {
-    const provider = index === 0 ? "openai" : "anthropic";
+  for (const { stateDir, provider, config } of staged) {
     const profileId = `qa-mock-${provider}`;
     const store = await readQaAuthProfiles(path.join(stateDir, "agents", "qa", "agent"));
     expect(Object.keys(store.profiles)).toEqual([profileId]);
-    expect(configs[index]?.auth).toEqual({
+    expect(config.auth).toEqual({
       profiles: {
-        [profileId]: {
-          provider,
-          mode: "api_key",
-          displayName: `QA mock ${provider} credential`,
-        },
+        [profileId]: { provider, mode: "api_key", displayName: `QA mock ${provider} credential` },
       },
     });
   }
@@ -147,7 +136,7 @@ it("refuses to bypass a pending legacy auth source", async () => {
 
 it("merges canonical API-key, token, and OAuth profile shapes", async () => {
   const { agentDir, write } = await createQaAuthState();
-  await write({
+  const profiles = {
     existing: {
       type: "api_key",
       provider: "openai",
@@ -165,16 +154,11 @@ it("merges canonical API-key, token, and OAuth profile shapes", async () => {
       refresh: "qa-refresh-token",
       expires: 1_900_000_000_000,
     },
-  });
-
-  await write({ "qa-mock-anthropic": apiKey("anthropic") });
-
-  expect((await readQaAuthProfiles(agentDir)).profiles).toMatchObject({
-    existing: { type: "api_key", provider: "openai" },
-    tokenProfile: { type: "token", provider: "github" },
-    oauthProfile: { type: "oauth", provider: "chatgpt" },
-    "qa-mock-anthropic": { type: "api_key", provider: "anthropic" },
-  });
+  } satisfies Parameters<typeof writeQaAuthProfiles>[0]["profiles"];
+  const added = { "qa-mock-anthropic": apiKey("anthropic") };
+  await write(profiles);
+  await write(added);
+  expect((await readQaAuthProfiles(agentDir)).profiles).toEqual({ ...profiles, ...added });
   await expect(fs.stat(path.join(agentDir, "auth-profiles.json"))).rejects.toMatchObject({
     code: "ENOENT",
   });
