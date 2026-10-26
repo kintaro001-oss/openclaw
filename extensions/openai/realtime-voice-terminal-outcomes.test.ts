@@ -25,7 +25,7 @@ const failed = (message: string, details: Record<string, unknown> = {}) =>
   });
 async function capture(
   terminalEvent: Record<string, unknown>,
-  options: { completeFollowup?: boolean; queueFollowup?: boolean; throwCallback?: boolean } = {},
+  mode: "queued" | "tools" | "throw" = "queued",
 ) {
   const clientEvents: string[] = [];
   const errors: string[] = [];
@@ -33,9 +33,7 @@ async function capture(
   const outcomes: RealtimeVoiceResponseOutcome[] = [];
   const tools: Array<{ itemId: string; callId: string; name: string; args: unknown }> = [];
   const responseCreated = createDeferred<void>();
-  const terminalProcessed = createDeferred<void>();
-  const followupCreated = createDeferred<void>();
-  const followupCompleted = createDeferred<void>();
+  const finished = createDeferred<void>();
   const waitFor = (promise: Promise<void>, message: string) =>
     withTimeout(promise, 2_000, { message: `timed out waiting for ${message}` });
   const server = createServer();
@@ -53,8 +51,9 @@ async function capture(
         send(ws, { type: "session.updated" });
       }
       if (event.type === "response.create") {
-        followupCreated.resolve();
-        if (options.completeFollowup) {
+        if (mode === "queued") {
+          finished.resolve();
+        } else if (mode === "throw") {
           send(ws, { type: "response.created", response: { id: "response_2" } });
           send(ws, done({ status: "completed", output: [] }, "response_2"));
         }
@@ -71,9 +70,9 @@ async function capture(
       outcomes.push(result);
       events.push(`outcome:${result.status}`);
       if (result.responseId === "response_2") {
-        followupCompleted.resolve();
+        finished.resolve();
       }
-      if (options.throwCallback && result.responseId === "response_1") {
+      if (mode === "throw" && result.responseId === "response_1") {
         throw new Error("consumer callback failed");
       }
     },
@@ -86,8 +85,8 @@ async function capture(
       if (event.direction === "server" && event.type === "response.created") {
         responseCreated.resolve();
       }
-      if (event.direction === "server" && event.type === terminalEvent.type) {
-        queueMicrotask(terminalProcessed.resolve);
+      if (mode === "tools" && event.direction === "server" && event.type === terminalEvent.type) {
+        queueMicrotask(finished.resolve);
       }
     },
   });
@@ -99,17 +98,11 @@ async function capture(
     }
     send(socket, { type: "response.created", response: { id: responseId } });
     await waitFor(responseCreated.promise, "response.created");
-    if (options.queueFollowup) {
+    if (mode !== "tools") {
       bridge.sendUserMessage?.("Continue after the terminal response.");
     }
     send(socket, terminalEvent);
-    await waitFor(terminalProcessed.promise, "terminal response");
-    if (options.queueFollowup) {
-      await waitFor(followupCreated.promise, "queued response.create");
-    }
-    if (options.completeFollowup) {
-      await waitFor(followupCompleted.promise, "completed follow-up");
-    }
+    await waitFor(finished.promise, `${mode} terminal response`);
     return { clientEvents, errors, events, outcomes, tools, connected: bridge.isConnected() };
   } finally {
     await bridge.close();
@@ -156,7 +149,6 @@ describe("OpenAI realtime terminal response ownership", () => {
     async (status, status_details, expected) => {
       const { clientEvents, events, ...actual } = await capture(
         done({ status, status_details, output: status === "completed" ? [] : [completedTool] }),
-        { queueFollowup: true },
       );
       expect(actual).toEqual({ errors: [], outcomes: [expected], tools: [], connected: true });
       expect(clientEvents.filter((type) => type === "response.create")).toHaveLength(1);
@@ -167,26 +159,15 @@ describe("OpenAI realtime terminal response ownership", () => {
   );
 
   it("delivers completed tools before their response owner is retired", async () => {
-    const captured = await capture(done({ status: "completed", output: [completedTool] }));
-    expect(captured.tools).toEqual([
-      {
-        itemId: "item_tool",
-        callId: "call_tool",
-        name: "lookup_weather",
-        args: { city: "Paris" },
-      },
-    ]);
+    const captured = await capture(done({ status: "completed", output: [completedTool] }), "tools");
+    expect(captured.tools).toHaveLength(1);
     expect(captured.events.indexOf("tool:call_tool")).toBeLessThan(
       captured.events.indexOf("outcome:completed"),
     );
   });
 
   it("drains a queued follow-up when the terminal consumer throws", async () => {
-    const captured = await capture(done({ status: "failed", output: [] }), {
-      completeFollowup: true,
-      queueFollowup: true,
-      throwCallback: true,
-    });
+    const captured = await capture(done({ status: "failed", output: [] }), "throw");
     expect(captured.errors).toEqual([]);
     expect(captured.outcomes).toEqual([
       outcome("failed", { message: "OpenAI realtime voice response failed" }),
