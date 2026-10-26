@@ -28,7 +28,7 @@ export async function launchTalkObservationBrowser(artifactDir: string, headed: 
     { stdio: ["ignore", "ignore", "pipe"] },
   );
   const stopped = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
+    child.once("close", () => resolve());
   });
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
   async function close() {
