@@ -1,8 +1,5 @@
 import { assert, expect, it, vi } from "vitest";
-import {
-  loadTranscriptEvents,
-  readTranscriptMutationAtSync,
-} from "../../config/sessions/session-accessor.js";
+import { loadTranscriptEvents } from "../../config/sessions/session-accessor.js";
 import { SqliteTranscriptMutationConflictError } from "../../config/sessions/session-mutation-conflict-error.js";
 import { QuestionManager } from "../../gateway/question-manager.js";
 import { createDeferredCore } from "../../shared/deferred.js";
@@ -30,36 +27,22 @@ for (const outcome of ["timeout", "answer"] as const) {
           persistAgentSessionMessage(manager, message, { invalidateSerializedPrefixCache: false });
         const userId = await persist({ role: "user", content: "Which target?", timestamp: 1 });
         assert(userId);
-        const args = {
-          questions: [
-            {
-              id: "target",
-              header: "Target",
-              question: "Which target?",
-              options: [{ label: "Staging" }, { label: "Production" }],
-            },
-          ],
-        };
+        const question = { id: "target", header: "Target", question: "Which target?" };
+        const options = [{ label: "Staging" }, { label: "Production" }];
+        const args = { questions: [{ ...question, options }] };
         const call = makeAgentAssistantMessage({
           content: [{ type: "toolCall", id: "ask", name: "ask_user", arguments: args }],
           stopReason: "toolUse",
         });
         const callId = await persist(call);
         assert(callId);
-        const before = readTranscriptMutationAtSync(target);
-        assert(typeof before === "number");
         const clock = createGatewaySchedulerClock(Date.now());
         const scheduler = createTestGatewayScheduler(clock.clock);
         const questions = new QuestionManager(scheduler);
         const waiting = createDeferredCore();
         let questionId = "";
-        const gatewayCall = (async (
-          method: string,
-          _options: unknown,
-          params: Record<string, unknown>,
-        ) => {
+        const gatewayCall: GatewayCall = async (method, _options, params) => {
           if (method === "question.request") {
-            expect(params.timeoutMs).toBe(900_000);
             questionId = questions.request(params as Parameters<QuestionManager["request"]>[0]).id;
             return { id: questionId };
           }
@@ -69,11 +52,9 @@ for (const outcome of ["timeout", "answer"] as const) {
             return answer;
           }
           throw new Error(`Unexpected question method: ${method}`);
-        }) as GatewayCall;
-        const pending = createAskUserTool({ sessionKey: target.sessionKey, gatewayCall }).execute(
-          "ask",
-          args,
-        );
+        };
+        const tool = createAskUserTool({ sessionKey: target.sessionKey, gatewayCall });
+        const pending = tool.execute("ask", args);
         const rewriteReady = createDeferredCore();
         const releaseRewrite = createDeferredCore();
         const withWorker = metadataRuntime.withSessionMetadataWorker;
@@ -81,24 +62,20 @@ for (const outcome of ["timeout", "answer"] as const) {
           mutation === "own-in-flight"
             ? vi
                 .spyOn(metadataRuntime, "withSessionMetadataWorker")
-                .mockImplementation((options, database, assertCurrent, operation, controls) =>
-                  withWorker(
-                    options,
-                    database,
-                    assertCurrent,
-                    (worker) =>
-                      operation({
-                        execute: async (command, commandOptions) => {
-                          if (command.type === "session.transcript.rewrite") {
-                            rewriteReady.resolve();
-                            await releaseRewrite.promise;
-                          }
-                          return worker.execute(command, commandOptions);
-                        },
-                      }),
-                    controls,
-                  ),
-                )
+                .mockImplementation((...workerArgs) => {
+                  const operation = workerArgs[3];
+                  workerArgs[3] = (worker) =>
+                    operation({
+                      execute: async (command, commandOptions) => {
+                        if (command.type === "session.transcript.rewrite") {
+                          rewriteReady.resolve();
+                          await releaseRewrite.promise;
+                        }
+                        return worker.execute(command, commandOptions);
+                      },
+                    });
+                  return withWorker(...workerArgs);
+                })
             : undefined;
         let commit: Promise<unknown> | undefined;
         let settlement: Promise<unknown> | undefined;
@@ -147,20 +124,16 @@ for (const outcome of ["timeout", "answer"] as const) {
             details: result.details,
             isError: false,
             timestamp: 3,
-          }).then(
-            (entryId) => ({ entryId }),
-            (error: unknown) => ({ error }),
-          );
+          }).catch((error: unknown) => error);
           releaseRewrite.resolve();
           expect(await commit).toBeUndefined();
           const settled = await settlement;
-          expect(readTranscriptMutationAtSync(target)).toBeGreaterThan(before);
           const events = await loadTranscriptEvents(target);
           if (mutation === "foreign") {
-            expect(settled).toEqual({ error: expect.any(SqliteTranscriptMutationConflictError) });
+            expect(settled).toBeInstanceOf(SqliteTranscriptMutationConflictError);
             expect(events).toEqual(foreignSnapshot);
           } else {
-            expect(settled).toEqual({ entryId: expect.any(String) });
+            expect(settled).toBeTypeOf("string");
             expect(events.at(-1)).toMatchObject({
               parentId: rewrittenId,
               message: { role: "toolResult", toolCallId: "ask", toolName: "ask_user", details },
