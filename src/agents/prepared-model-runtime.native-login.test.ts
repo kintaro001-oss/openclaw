@@ -42,8 +42,7 @@ const refreshAuth = vi.fn(async () => {
 });
 
 beforeEach(() => {
-  vi.useFakeTimers();
-  vi.setSystemTime(0);
+  vi.useFakeTimers({ now: 0 });
   vi.spyOn(AbortSignal, "timeout").mockReturnValue(new AbortController().signal);
   native.probe.mockReset().mockResolvedValue(undefined);
   native.unrelatedProbe.mockReset();
@@ -172,28 +171,21 @@ it("keeps saved profile credentials authoritative across native login and logout
 it("coalesces pending login checks and fences their result when the owner retires", async () => {
   await using resources = new AsyncDisposableStack();
   const { recheck, readAuth, publish, retirement } = fixture(resources);
-  const started = createDeferredCore<AbortSignal>();
-  const completed = createDeferredCore();
-  native.probe.mockImplementation(async ({ signal }) => {
-    if (!signal) {
-      throw new Error("Native login checks must carry their owner's cancellation signal");
-    }
-    started.resolve(signal);
-    await completed.promise;
-    return nativeLogin;
-  });
+  const completed = createDeferredCore<typeof nativeLogin>();
+  native.probe.mockImplementation(() => completed.promise);
   resources.defer(async () => {
-    completed.resolve();
+    completed.resolve(nativeLogin);
     await vi.advanceTimersByTimeAsync(0);
   });
   await tick(recheck);
   expect(native.probe).toHaveBeenCalledOnce();
-  const signal = await started.promise;
+  const signal = native.probe.mock.calls[0]![0].signal;
+  expect(signal).toBeDefined();
   await tick(recheck);
   expect(native.probe).toHaveBeenCalledOnce();
   retirement.abort();
-  expect(signal.aborted).toBe(true);
-  completed.resolve();
+  expect(signal?.aborted).toBe(true);
+  completed.resolve(nativeLogin);
   await vi.advanceTimersByTimeAsync(0);
   expect(publish).not.toHaveBeenCalled();
   expect(readAuth().authModes).toEqual({ shared: "api_key" });
