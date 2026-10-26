@@ -66,6 +66,7 @@ it.each(["question", "outside"] as const)("restores only question focus (%s)", a
   target.focus();
 
   page.questionId = "";
+  await settle(page);
   await waitForSolid(() => {
     expect(input.isConnected).toBe(false);
     const next = focusAt === "question" ? page.querySelector("#question-page-title") : outside;

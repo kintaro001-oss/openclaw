@@ -64,14 +64,14 @@ function mountPage(request: ReturnType<typeof createGatewayRequestMock>) {
     { wrapper: provider.wrapper },
   );
   flush();
-  const query = <T extends Element = HTMLElement>(selector: string) =>
-    page.container.querySelector<T>(selector)!;
+  const query = (selector: string) => page.container.querySelector<HTMLElement>(selector)!;
   const dialog = () => query("openclaw-modal-dialog");
-  const submit = () => query<HTMLButtonElement>('.secrets-store-dialog button[type="submit"]');
+  const submit = () =>
+    page.container.querySelector<HTMLButtonElement>('.secrets-store-dialog button[type="submit"]')!;
   const openDraft = async () => {
-    query<HTMLButtonElement>("button.primary").click();
+    query("button.primary").click();
     await waitForSolid(() => expect(dialog()).not.toBeNull());
-    const field = query<HTMLInputElement>('input[name="name"]');
+    const field = page.container.querySelector<HTMLInputElement>('input[name="name"]')!;
     fireEvent.input(field, { target: { value: "api_token" } });
     fireEvent.input(query('textarea[name="value"]'), { target: { value: "https://example.test" } });
     flush();
@@ -124,14 +124,18 @@ it.each(["reconnect", "route"])("retires connection-scoped reads and saves on %s
   expect(page.container.textContent).not.toContain("STALE_URL");
 
   await openDraft();
-  expect(query<HTMLInputElement>('input[value="secret"]').checked).toBe(true);
+  expect(page.container.querySelector<HTMLInputElement>('input[value="secret"]')!.checked).toBe(
+    true,
+  );
   submit().click();
   await waitForSolid(() => expect(submit().textContent).toContain("Saving"));
   expect(submit().disabled).toBe(true);
   firstSave.reject(new Error("Synthetic save unavailable"));
   await waitForSolid(() => expect(submit().disabled).toBe(false));
   expect(page.container.textContent).toContain("Synthetic save unavailable");
-  expect(query<HTMLInputElement>('input[name="name"]').value).toBe("API_TOKEN");
+  expect(page.container.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe(
+    "API_TOKEN",
+  );
   submit().click();
   await waitForSolid(() => expect(submit().disabled).toBe(true));
   expect(saveCount).toBe(2);

@@ -16,10 +16,15 @@ const mocks = vi.hoisted(() => ({
   runNodeDaemonLifecycle: vi.fn(),
   runNodeDaemonStatus: vi.fn(),
 }));
+// mock-isolation: Command dispatch must not install or alter host services.
 vi.mock("./daemon.js", () => mocks);
+// mock-isolation: Saved configuration is an explicit per-case fixture, never the operator's file.
 vi.mock("../../node-host/config.js", () => ({ loadNodeHostConfig: mocks.loadNodeHostConfig }));
+// mock-isolation: Assert dispatch without starting a real node host.
 vi.mock("../../node-host/runner.js", () => ({ runNodeHost: mocks.runNodeHost }));
+// mock-isolation: Assert worker options without starting a real worker.
 vi.mock("../../node-host/worker.js", () => ({ runNodeHostWorker: mocks.runNodeHostWorker }));
+// mock-isolation: Capture command output and exits without affecting the test process.
 vi.mock("../../runtime.js", () => ({ defaultRuntime: mocks.defaultRuntime }));
 const { defaultRuntime: runtime } = mocks;
 
