@@ -232,10 +232,10 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
   if ((selectedState.nextAttemptAt ?? 0) > Date.now()) {
     return false;
   }
-  if (
-    selectedState.status === "pending" &&
-    selectedState.attemptCount >= REQUESTER_SETTLE_WAKE_MAX_ATTEMPTS
-  ) {
+  if (selectedState.attemptCount >= REQUESTER_SETTLE_WAKE_MAX_ATTEMPTS) {
+    // The cap applies to every live wake, not only a pending one. A wake restored as
+    // "dispatching" holds an uncertain receipt; if it has already spent its attempts,
+    // no further dispatch may be authorized or the wake re-arms forever.
     await completeBatch(settledBatch, selectedState, {
       delivered: false,
       path: "none",
@@ -560,8 +560,7 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
     }
     let dispatchPrepared = false;
     let dispatchAccepted = false;
-    const attemptCount =
-      state.status === "dispatching" ? state.attemptCount : Math.max(1, state.attemptCount + 1);
+    const attemptCount = Math.max(1, state.attemptCount + 1);
     let delivery: Awaited<ReturnType<typeof deliverSubagentAnnouncement>>;
     try {
       const dispatch = () => {

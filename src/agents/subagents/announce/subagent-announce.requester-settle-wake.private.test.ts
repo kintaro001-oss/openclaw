@@ -111,3 +111,57 @@ describe("maybeWakeRequesterAfterAllChildrenSettled private batches", () => {
     );
   });
 });
+
+describe("requester settle wake attempt cap", () => {
+  it("does not dispatch again when a restored wake already spent every attempt", async () => {
+    // A wake restored from disk reads back as "dispatching". Its attempt counter is
+    // frozen at the cap, so the cap guard (which only matched a pending wake) never
+    // fired and the wake re-armed on every sweep, forever.
+    const children = [
+      makeSettledChild({
+        runId: "run-b",
+        requesterSettleWake: {
+          status: "dispatching",
+          attemptCount: 3,
+          batchRunIds: ["run-b"],
+          rearmGeneration: 1,
+        },
+      }),
+    ];
+    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue(children);
+
+    const woken = await wake();
+
+    expect(woken).toBe(false);
+    expect(deliverSpy).not.toHaveBeenCalled();
+    expect(completeBatchSpy).toHaveBeenCalledWith(
+      ["run-b"],
+      expect.anything(),
+      expect.objectContaining({ delivered: false, path: "none" }),
+    );
+  });
+
+  it("counts a restored dispatching wake toward the cap instead of freezing it", async () => {
+    const children = [
+      makeSettledChild({
+        runId: "run-b",
+        requesterSettleWake: {
+          status: "dispatching",
+          attemptCount: 1,
+          batchRunIds: ["run-b"],
+          rearmGeneration: 1,
+        },
+      }),
+    ];
+    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue(children);
+    deliverSpy.mockResolvedValue({ delivered: false, path: "none", disposition: "retryable" });
+
+    await wake();
+
+    // The attempt counter must advance past the frozen value, otherwise it can never
+    // reach the cap and the wake retries without bound.
+    expect(deliverSpy).toHaveBeenCalledOnce();
+    const outcome = completeBatchSpy.mock.calls[0]?.[2];
+    expect(outcome).toMatchObject({ delivered: false });
+  });
+});
